@@ -224,6 +224,11 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
 
 export default {
   async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/profile-csv") {
+      return env.PYTHON_WORKER.fetch(request);
+    }
+
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
