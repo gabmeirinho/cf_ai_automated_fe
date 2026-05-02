@@ -146,3 +146,7 @@ dist
 .dev.vars*
 !.dev.vars.example
 !.env.example
+
+#MD roadmap files
+PROJECT_ROADMAP.md
+PLAN.md

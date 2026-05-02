@@ -19,6 +19,19 @@ For all limits and quotas, retrieve from the product's `/platform/limits/` page.
 
 Run `wrangler types` after changing bindings in wrangler.jsonc.
 
+## Git Practices
+
+- Keep commits small and focused around one logical change.
+- Check `git status --short` before editing, before committing, and before pushing.
+- Do not mix unrelated changes in the same commit.
+- Do not revert or overwrite user changes unless explicitly asked.
+- Use clear commit messages in the imperative mood, for example `Add dataset upload plan`.
+- Run relevant checks before committing code changes, usually `npm run check`.
+- Do not commit secrets, `.dev.vars`, `.env`, generated build output, or dependency folders.
+- Commit Cloudflare binding changes together with generated types from `npx wrangler types`.
+- Prefer feature branches for implementation work after the initial setup commit.
+- Push only after the working tree contains exactly the intended committed changes.
+
 ## Node.js Compatibility
 
 https://developers.cloudflare.com/workers/runtime-apis/nodejs/
