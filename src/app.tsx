@@ -4,6 +4,7 @@ import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { MCPServersState } from "agents";
 import type { ChatAgent } from "./server";
+import Papa from "papaparse";
 import {
   Badge,
   Button,
@@ -40,6 +41,8 @@ import {
 } from "@phosphor-icons/react";
 
 const MAX_CSV_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_INFERENCE_ROWS = 1000;
+const MAX_PREVIEW_ROWS = 20;
 
 type InferredColumnType =
   | "string"
@@ -122,33 +125,166 @@ function validateCsvFile(file: File): string | null {
   return null;
 }
 
-async function parseCsvFile(file: File): Promise<DatasetSummary> {
-  const response = await fetch("/profile-csv", {
-    method: "POST",
-    headers: {
-      "content-type": file.type || "text/csv",
-      "x-file-name": encodeURIComponent(file.name),
-      "x-file-size": String(file.size)
-    },
-    body: file
-  });
+function isMissing(value: unknown) {
+  return value == null || String(value).trim() === "";
+}
 
-  const body = (await response.json()) as DatasetSummary | { error?: string };
-  if (!response.ok) {
-    throw new Error(
-      "error" in body && body.error ? body.error : "CSV parsing failed."
+function looksBoolean(value: string) {
+  return /^(true|false|0|1|yes|no)$/i.test(value.trim());
+}
+
+function looksNumber(value: string) {
+  if (value.trim() === "") return false;
+  return Number.isFinite(Number(value));
+}
+
+function looksDate(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || looksNumber(trimmed)) return false;
+  const timestamp = Date.parse(trimmed);
+  return Number.isFinite(timestamp);
+}
+
+function inferColumnType(values: string[]): InferredColumnType {
+  const present = values.filter((value) => !isMissing(value));
+  if (present.length === 0) return "empty";
+
+  const checks: Array<[InferredColumnType, (value: string) => boolean]> = [
+    ["number", looksNumber],
+    ["boolean", looksBoolean],
+    ["date", looksDate]
+  ];
+
+  for (const [type, check] of checks) {
+    if (present.every(check)) return type;
+  }
+
+  const hasStructuredSignal = present.some(
+    (value) => looksNumber(value) || looksBoolean(value) || looksDate(value)
+  );
+  return hasStructuredSignal ? "mixed" : "string";
+}
+
+function normalizePreviewValue(value: unknown): PreviewValue {
+  if (isMissing(value)) return null;
+  return String(value);
+}
+
+function buildDatasetSummary(file: File, rows: Record<string, unknown>[]) {
+  const firstRow = rows[0];
+  const fields = firstRow ? Object.keys(firstRow) : [];
+  const warnings: string[] = [];
+
+  if (fields.length === 0) {
+    throw new Error("CSV has no usable header row.");
+  }
+
+  if (rows.length === 0) {
+    throw new Error("CSV has no data rows.");
+  }
+
+  if (rows.length >= MAX_INFERENCE_ROWS) {
+    warnings.push(
+      `Schema was inferred from the first ${MAX_INFERENCE_ROWS.toLocaleString()} rows.`
     );
   }
 
-  const summary = body as DatasetSummary;
-  console.info("CSV upload parsed", {
-    fileName: summary.fileName,
-    fileSizeBytes: summary.fileSizeBytes,
-    parsedRowCount: summary.parsedRowCount,
-    columns: summary.columns.length
+  const columns = fields.map((field) => {
+    const values = rows.map((row) => String(row[field] ?? ""));
+    const uniqueSamples = Array.from(
+      new Set(values.filter((value) => !isMissing(value)).slice(0, 10))
+    ).slice(0, 5);
+
+    return {
+      name: field,
+      inferredType: inferColumnType(values),
+      missingCount: values.filter(isMissing).length,
+      sampleValues: uniqueSamples
+    };
   });
 
-  return summary;
+  return {
+    fileName: file.name,
+    fileSizeBytes: file.size,
+    parsedRowCount: rows.length,
+    columns,
+    previewRows: rows
+      .slice(0, MAX_PREVIEW_ROWS)
+      .map((row) =>
+        Object.fromEntries(
+          fields.map((field) => [field, normalizePreviewValue(row[field])])
+        )
+      ),
+    warnings
+  } satisfies DatasetSummary;
+}
+
+function parseCsvFile(file: File): Promise<DatasetSummary> {
+  return new Promise((resolve, reject) => {
+    let generatedHeaderCount = 0;
+
+    Papa.parse<Record<string, unknown>>(file, {
+      header: true,
+      preview: MAX_INFERENCE_ROWS,
+      skipEmptyLines: true,
+      transformHeader: (header, index) => {
+        const trimmed = header.trim();
+        if (trimmed) return trimmed;
+        generatedHeaderCount += 1;
+        return `unnamed_${index + 1}`;
+      },
+      complete: (results) => {
+        const renamedHeaders = (
+          results.meta as Papa.ParseMeta & {
+            renamedHeaders?: Record<string, string>;
+          }
+        ).renamedHeaders;
+
+        if (renamedHeaders && Object.keys(renamedHeaders).length > 0) {
+          reject(new Error("CSV contains duplicate column names."));
+          return;
+        }
+
+        const severeError = results.errors.find(
+          (error) =>
+            error.code !== "TooFewFields" && error.code !== "TooManyFields"
+        );
+
+        if (severeError) {
+          reject(new Error(severeError.message || "CSV parsing failed."));
+          return;
+        }
+
+        try {
+          const summary = buildDatasetSummary(file, results.data);
+          if (generatedHeaderCount > 0) {
+            summary.warnings.push(
+              `${generatedHeaderCount} empty column header${generatedHeaderCount === 1 ? " was" : "s were"} renamed to unnamed columns.`
+            );
+          }
+          const fieldErrors = results.errors.filter(
+            (error) =>
+              error.code === "TooFewFields" || error.code === "TooManyFields"
+          );
+          if (fieldErrors.length > 0) {
+            summary.warnings.push(
+              `${fieldErrors.length} row${fieldErrors.length === 1 ? "" : "s"} had an inconsistent field count.`
+            );
+          }
+          console.info("CSV upload parsed", {
+            fileName: summary.fileName,
+            fileSizeBytes: summary.fileSizeBytes,
+            parsedRowCount: summary.parsedRowCount,
+            columns: summary.columns.length
+          });
+          resolve(summary);
+        } catch (error) {
+          reject(error);
+        }
+      },
+      error: (error) => reject(new Error(error.message))
+    });
+  });
 }
 
 // ── Small components ──────────────────────────────────────────────────

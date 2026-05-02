@@ -224,35 +224,6 @@ If the user asks to schedule a task, use the schedule tool to schedule the task.
 
 export default {
   async fetch(request: Request, env: Env) {
-    const url = new URL(request.url);
-    if (url.pathname === "/profile-csv") {
-      const body =
-        request.method === "GET" || request.method === "HEAD"
-          ? undefined
-          : await request.arrayBuffer();
-      const createProxyRequest = (targetUrl: string | URL) =>
-        new Request(targetUrl, {
-          method: request.method,
-          headers: new Headers(request.headers),
-          body: body?.slice(0)
-        });
-
-      try {
-        return await env.PYTHON_WORKER.fetch(createProxyRequest(request.url));
-      } catch (error) {
-        if (url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
-          throw error;
-        }
-
-        const localUrl = new URL(request.url);
-        localUrl.protocol = "http:";
-        localUrl.hostname = "127.0.0.1";
-        localUrl.port = "8791";
-        localUrl.pathname = "/";
-        return fetch(createProxyRequest(localUrl));
-      }
-    }
-
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
