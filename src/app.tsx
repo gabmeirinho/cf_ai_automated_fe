@@ -4,6 +4,7 @@ import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { MCPServersState } from "agents";
 import type { ChatAgent } from "./server";
+import Papa from "papaparse";
 import {
   Badge,
   Button,
@@ -39,6 +40,43 @@ import {
   ImageIcon
 } from "@phosphor-icons/react";
 
+const MAX_CSV_SIZE_BYTES = 10 * 1024 * 1024;
+const MAX_INFERENCE_ROWS = 1000;
+const MAX_PREVIEW_ROWS = 20;
+
+type InferredColumnType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "date"
+  | "empty"
+  | "mixed";
+
+type PreviewValue = string | number | boolean | null;
+
+interface ColumnSummary {
+  name: string;
+  inferredType: InferredColumnType;
+  missingCount: number;
+  sampleValues: string[];
+}
+
+interface DatasetSummary {
+  fileName: string;
+  fileSizeBytes: number;
+  parsedRowCount: number;
+  columns: ColumnSummary[];
+  previewRows: Record<string, PreviewValue>[];
+  warnings: string[];
+}
+
+type UploadState =
+  | { status: "idle" }
+  | { status: "validating"; fileName: string }
+  | { status: "parsing"; fileName: string }
+  | { status: "ready"; summary: DatasetSummary }
+  | { status: "error"; message: string };
+
 // ── Attachment helpers ────────────────────────────────────────────────
 
 interface Attachment {
@@ -63,6 +101,183 @@ function fileToDataUri(file: File): Promise<string> {
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = reject;
     reader.readAsDataURL(file);
+  });
+}
+
+// ── CSV upload helpers ────────────────────────────────────────────────
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function validateCsvFile(file: File): string | null {
+  if (!file.name.toLowerCase().endsWith(".csv")) {
+    return "Select a .csv file.";
+  }
+  if (file.size === 0) {
+    return "The CSV file is empty.";
+  }
+  if (file.size > MAX_CSV_SIZE_BYTES) {
+    return `The CSV file is ${formatBytes(file.size)}. The MVP limit is ${formatBytes(MAX_CSV_SIZE_BYTES)}.`;
+  }
+  return null;
+}
+
+function isMissing(value: unknown) {
+  return value == null || String(value).trim() === "";
+}
+
+function looksBoolean(value: string) {
+  return /^(true|false|0|1|yes|no)$/i.test(value.trim());
+}
+
+function looksNumber(value: string) {
+  if (value.trim() === "") return false;
+  return Number.isFinite(Number(value));
+}
+
+function looksDate(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed || looksNumber(trimmed)) return false;
+  const timestamp = Date.parse(trimmed);
+  return Number.isFinite(timestamp);
+}
+
+function inferColumnType(values: string[]): InferredColumnType {
+  const present = values.filter((value) => !isMissing(value));
+  if (present.length === 0) return "empty";
+
+  const checks: Array<[InferredColumnType, (value: string) => boolean]> = [
+    ["number", looksNumber],
+    ["boolean", looksBoolean],
+    ["date", looksDate]
+  ];
+
+  for (const [type, check] of checks) {
+    if (present.every(check)) return type;
+  }
+
+  const hasStructuredSignal = present.some(
+    (value) => looksNumber(value) || looksBoolean(value) || looksDate(value)
+  );
+  return hasStructuredSignal ? "mixed" : "string";
+}
+
+function normalizePreviewValue(value: unknown): PreviewValue {
+  if (isMissing(value)) return null;
+  return String(value);
+}
+
+function buildDatasetSummary(file: File, rows: Record<string, unknown>[]) {
+  const firstRow = rows[0];
+  const fields = firstRow ? Object.keys(firstRow) : [];
+  const warnings: string[] = [];
+
+  if (fields.length === 0) {
+    throw new Error("CSV has no usable header row.");
+  }
+
+  if (rows.length === 0) {
+    throw new Error("CSV has no data rows.");
+  }
+
+  if (rows.length >= MAX_INFERENCE_ROWS) {
+    warnings.push(
+      `Schema was inferred from the first ${MAX_INFERENCE_ROWS.toLocaleString()} rows.`
+    );
+  }
+
+  const columns = fields.map((field) => {
+    const values = rows.map((row) => String(row[field] ?? ""));
+    const uniqueSamples = Array.from(
+      new Set(values.filter((value) => !isMissing(value)).slice(0, 10))
+    ).slice(0, 5);
+
+    return {
+      name: field,
+      inferredType: inferColumnType(values),
+      missingCount: values.filter(isMissing).length,
+      sampleValues: uniqueSamples
+    };
+  });
+
+  return {
+    fileName: file.name,
+    fileSizeBytes: file.size,
+    parsedRowCount: rows.length,
+    columns,
+    previewRows: rows
+      .slice(0, MAX_PREVIEW_ROWS)
+      .map((row) =>
+        Object.fromEntries(
+          fields.map((field) => [field, normalizePreviewValue(row[field])])
+        )
+      ),
+    warnings
+  } satisfies DatasetSummary;
+}
+
+function parseCsvFile(file: File): Promise<DatasetSummary> {
+  return new Promise((resolve, reject) => {
+    let generatedHeaderCount = 0;
+
+    Papa.parse<Record<string, unknown>>(file, {
+      header: true,
+      preview: MAX_INFERENCE_ROWS,
+      skipEmptyLines: true,
+      transformHeader: (header, index) => {
+        const trimmed = header.trim();
+        if (trimmed) return trimmed;
+        generatedHeaderCount += 1;
+        return `unnamed_${index + 1}`;
+      },
+      complete: (results) => {
+        const renamedHeaders = (
+          results.meta as Papa.ParseMeta & {
+            renamedHeaders?: Record<string, string>;
+          }
+        ).renamedHeaders;
+
+        if (renamedHeaders && Object.keys(renamedHeaders).length > 0) {
+          reject(new Error("CSV contains duplicate column names."));
+          return;
+        }
+
+        const severeError = results.errors.find(
+          (error) =>
+            error.code !== "TooFewFields" && error.code !== "TooManyFields"
+        );
+
+        if (severeError) {
+          reject(new Error(severeError.message || "CSV parsing failed."));
+          return;
+        }
+
+        try {
+          const summary = buildDatasetSummary(file, results.data);
+          if (generatedHeaderCount > 0) {
+            summary.warnings.push(
+              `${generatedHeaderCount} empty column header${generatedHeaderCount === 1 ? " was" : "s were"} renamed to unnamed columns.`
+            );
+          }
+          const fieldErrors = results.errors.filter(
+            (error) =>
+              error.code === "TooFewFields" || error.code === "TooManyFields"
+          );
+          if (fieldErrors.length > 0) {
+            summary.warnings.push(
+              `${fieldErrors.length} row${fieldErrors.length === 1 ? "" : "s"} had an inconsistent field count.`
+            );
+          }
+          resolve(summary);
+        } catch (error) {
+          reject(error);
+        }
+      },
+      error: (error) => reject(new Error(error.message))
+    });
   });
 }
 
@@ -226,9 +441,16 @@ function Chat() {
   const [showDebug, setShowDebug] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [isCsvDragging, setIsCsvDragging] = useState(false);
+  const [uploadState, setUploadState] = useState<UploadState>({
+    status: "idle"
+  });
+  const [selectedTarget, setSelectedTarget] = useState("");
+  const [confirmedTarget, setConfirmedTarget] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const csvInputRef = useRef<HTMLInputElement>(null);
   const toasts = useKumoToastManager();
   const [mcpState, setMcpState] = useState<MCPServersState>({
     prompts: [],
@@ -428,6 +650,75 @@ function Chat() {
     if (textareaRef.current) textareaRef.current.style.height = "auto";
   }, [input, attachments, isStreaming, sendMessage]);
 
+  const resetWorkspace = useCallback(() => {
+    setUploadState({ status: "idle" });
+    setSelectedTarget("");
+    setConfirmedTarget("");
+    if (csvInputRef.current) csvInputRef.current.value = "";
+  }, []);
+
+  const handleCsvFile = useCallback(
+    async (file: File) => {
+      if (uploadState.status === "ready") {
+        const replace = window.confirm(
+          "Uploading a new CSV will replace the active dataset and clear the selected target."
+        );
+        if (!replace) return;
+        setSelectedTarget("");
+        setConfirmedTarget("");
+      }
+
+      setUploadState({ status: "validating", fileName: file.name });
+      const validationError = validateCsvFile(file);
+      if (validationError) {
+        setUploadState({ status: "error", message: validationError });
+        return;
+      }
+
+      setUploadState({ status: "parsing", fileName: file.name });
+      try {
+        const summary = await parseCsvFile(file);
+        setUploadState({ status: "ready", summary });
+        setSelectedTarget("");
+        setConfirmedTarget("");
+      } catch (error) {
+        setUploadState({
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "The CSV could not be parsed."
+        });
+      } finally {
+        if (csvInputRef.current) csvInputRef.current.value = "";
+      }
+    },
+    [uploadState.status]
+  );
+
+  const handleCsvInputChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const file = event.target.files?.[0];
+      if (file) void handleCsvFile(file);
+    },
+    [handleCsvFile]
+  );
+
+  const handleCsvDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setIsCsvDragging(false);
+      const file = event.dataTransfer.files?.[0];
+      if (file) void handleCsvFile(file);
+    },
+    [handleCsvFile]
+  );
+
+  const currentSummary =
+    uploadState.status === "ready" ? uploadState.summary : null;
+  const canConfirmTarget = Boolean(currentSummary && selectedTarget);
+
   return (
     <div
       className="flex flex-col h-screen bg-kumo-elevated relative"
@@ -449,11 +740,11 @@ function Chat() {
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold text-kumo-default">
-              <span className="mr-2">⛅</span>Agent Starter
+              Automated FE
             </h1>
             <Badge variant="secondary">
               <ChatCircleDotsIcon size={12} weight="bold" className="mr-1" />
-              AI Chat
+              Workspace
             </Badge>
           </div>
           <div className="flex items-center gap-3">
@@ -652,6 +943,297 @@ function Chat() {
           </div>
         </div>
       </header>
+
+      {/* Active workspace */}
+      <section className="border-b border-kumo-line bg-kumo-base">
+        <div className="max-w-5xl mx-auto px-5 py-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+          <Surface
+            className={`rounded-xl ring p-4 transition-colors ${
+              isCsvDragging
+                ? "ring-2 ring-kumo-brand bg-kumo-brand/5"
+                : "ring-kumo-line"
+            }`}
+            onDragOver={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (event.dataTransfer.types.includes("Files")) {
+                setIsCsvDragging(true);
+              }
+            }}
+            onDragLeave={(event) => {
+              event.preventDefault();
+              event.stopPropagation();
+              if (event.currentTarget === event.target) {
+                setIsCsvDragging(false);
+              }
+            }}
+            onDrop={handleCsvDrop}
+          >
+            <input
+              ref={csvInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={handleCsvInputChange}
+            />
+
+            <div className="flex flex-col gap-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <Text size="lg" bold>
+                    Active dataset
+                  </Text>
+                  <Text size="sm" variant="secondary">
+                    Upload one CSV file to inspect columns and choose the target
+                    variable.
+                  </Text>
+                </div>
+                <div className="flex gap-2">
+                  {currentSummary && (
+                    <Button
+                      type="button"
+                      variant="secondary"
+                      size="sm"
+                      icon={<TrashIcon size={14} />}
+                      onClick={resetWorkspace}
+                    >
+                      Reset
+                    </Button>
+                  )}
+                  <Button
+                    type="button"
+                    variant="primary"
+                    size="sm"
+                    icon={<PaperclipIcon size={14} />}
+                    onClick={() => csvInputRef.current?.click()}
+                    disabled={
+                      uploadState.status === "validating" ||
+                      uploadState.status === "parsing"
+                    }
+                  >
+                    Choose CSV
+                  </Button>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-dashed border-kumo-line bg-kumo-elevated px-4 py-5 text-center">
+                <Text size="sm" bold>
+                  Drop a CSV here
+                </Text>
+                <Text size="xs" variant="secondary">
+                  `.csv` only, up to {formatBytes(MAX_CSV_SIZE_BYTES)}. No LLM
+                  calls run during upload or target selection.
+                </Text>
+              </div>
+
+              {uploadState.status === "validating" && (
+                <Badge variant="secondary">
+                  Validating {uploadState.fileName}
+                </Badge>
+              )}
+              {uploadState.status === "parsing" && (
+                <Badge variant="secondary">
+                  Parsing {uploadState.fileName}
+                </Badge>
+              )}
+              {uploadState.status === "error" && (
+                <div className="rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 px-3 py-2">
+                  <Text size="sm">{uploadState.message}</Text>
+                </div>
+              )}
+
+              {currentSummary && (
+                <div className="grid gap-4">
+                  <div className="grid gap-2 sm:grid-cols-4">
+                    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+                      <Text size="xs" variant="secondary">
+                        File
+                      </Text>
+                      <Text size="sm" bold>
+                        {currentSummary.fileName}
+                      </Text>
+                    </div>
+                    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+                      <Text size="xs" variant="secondary">
+                        Size
+                      </Text>
+                      <Text size="sm" bold>
+                        {formatBytes(currentSummary.fileSizeBytes)}
+                      </Text>
+                    </div>
+                    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+                      <Text size="xs" variant="secondary">
+                        Rows sampled
+                      </Text>
+                      <Text size="sm" bold>
+                        {currentSummary.parsedRowCount.toLocaleString()}
+                      </Text>
+                    </div>
+                    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+                      <Text size="xs" variant="secondary">
+                        Columns
+                      </Text>
+                      <Text size="sm" bold>
+                        {currentSummary.columns.length}
+                      </Text>
+                    </div>
+                  </div>
+
+                  {currentSummary.warnings.length > 0 && (
+                    <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 px-3 py-2">
+                      {currentSummary.warnings.map((warning) => (
+                        <Text key={warning} size="xs">
+                          {warning}
+                        </Text>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="overflow-auto rounded-lg border border-kumo-line">
+                    <table className="min-w-full text-left text-sm">
+                      <thead className="bg-kumo-elevated text-kumo-subtle">
+                        <tr>
+                          <th className="px-3 py-2 font-medium">Column</th>
+                          <th className="px-3 py-2 font-medium">Type</th>
+                          <th className="px-3 py-2 font-medium">Missing</th>
+                          <th className="px-3 py-2 font-medium">Samples</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-kumo-line">
+                        {currentSummary.columns.map((column) => (
+                          <tr key={column.name}>
+                            <td className="px-3 py-2 font-medium text-kumo-default">
+                              {column.name}
+                              {confirmedTarget === column.name && (
+                                <Badge variant="primary" className="ml-2">
+                                  Target
+                                </Badge>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-kumo-subtle">
+                              {column.inferredType}
+                            </td>
+                            <td className="px-3 py-2 text-kumo-subtle">
+                              {column.missingCount}
+                            </td>
+                            <td className="px-3 py-2 text-kumo-subtle">
+                              {column.sampleValues.length > 0
+                                ? column.sampleValues.join(", ")
+                                : "No non-empty samples"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <details className="rounded-lg border border-kumo-line bg-kumo-elevated">
+                    <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-kumo-default">
+                      Preview first {currentSummary.previewRows.length} rows
+                    </summary>
+                    <div className="overflow-auto border-t border-kumo-line">
+                      <table className="min-w-full text-left text-xs">
+                        <thead className="bg-kumo-base text-kumo-subtle">
+                          <tr>
+                            {currentSummary.columns.map((column) => (
+                              <th
+                                key={column.name}
+                                className="px-3 py-2 font-medium"
+                              >
+                                {column.name}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-kumo-line">
+                          {currentSummary.previewRows.map((row, rowIndex) => (
+                            <tr key={rowIndex}>
+                              {currentSummary.columns.map((column) => (
+                                <td
+                                  key={column.name}
+                                  className="max-w-52 truncate px-3 py-2 text-kumo-subtle"
+                                >
+                                  {row[column.name] == null
+                                    ? "NULL"
+                                    : String(row[column.name])}
+                                </td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                </div>
+              )}
+            </div>
+          </Surface>
+
+          <Surface className="rounded-xl ring ring-kumo-line p-4">
+            <div className="space-y-4">
+              <div>
+                <Text size="lg" bold>
+                  Target variable
+                </Text>
+                <Text size="sm" variant="secondary">
+                  Select the prediction target after the CSV is parsed.
+                </Text>
+              </div>
+
+              <select
+                value={selectedTarget}
+                onChange={(event) => setSelectedTarget(event.target.value)}
+                disabled={!currentSummary}
+                className="w-full rounded-lg border border-kumo-line bg-kumo-base px-3 py-2 text-sm text-kumo-default focus:outline-none focus:ring-2 focus:ring-kumo-ring disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <option value="">
+                  {currentSummary ? "Choose a column" : "Upload a CSV first"}
+                </option>
+                {currentSummary?.columns.map((column) => (
+                  <option key={column.name} value={column.name}>
+                    {column.name}
+                  </option>
+                ))}
+              </select>
+
+              <Button
+                type="button"
+                variant="primary"
+                icon={<CheckCircleIcon size={14} />}
+                disabled={!canConfirmTarget}
+                onClick={() => {
+                  setConfirmedTarget(selectedTarget);
+                  toasts.add({
+                    title: "Target selected",
+                    description: selectedTarget
+                  });
+                }}
+              >
+                Confirm target
+              </Button>
+
+              {confirmedTarget ? (
+                <div className="rounded-lg border border-kumo-success/40 bg-kumo-success/10 px-3 py-2">
+                  <Text size="sm" bold>
+                    {confirmedTarget}
+                  </Text>
+                  <Text size="xs" variant="secondary">
+                    The workspace is ready for split setup and later feature
+                    planning.
+                  </Text>
+                </div>
+              ) : (
+                <div className="rounded-lg border border-kumo-line bg-kumo-elevated px-3 py-2">
+                  <Text size="xs" variant="secondary">
+                    No target selected. LLM analysis remains disabled for this
+                    milestone.
+                  </Text>
+                </div>
+              )}
+            </div>
+          </Surface>
+        </div>
+      </section>
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
