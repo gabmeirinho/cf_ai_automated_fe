@@ -11,11 +11,11 @@ For all limits and quotas, retrieve from the product's `/platform/limits/` page.
 
 ## Commands
 
-| Command | Purpose |
-|---------|---------|
-| `npx wrangler dev` | Local development |
-| `npx wrangler deploy` | Deploy to Cloudflare |
-| `npx wrangler types` | Generate TypeScript types |
+| Command               | Purpose                   |
+| --------------------- | ------------------------- |
+| `npx wrangler dev`    | Local development         |
+| `npx wrangler deploy` | Deploy to Cloudflare      |
+| `npx wrangler types`  | Generate TypeScript types |
 
 Run `wrangler types` after changing bindings in wrangler.jsonc.
 
@@ -31,6 +31,14 @@ Run `wrangler types` after changing bindings in wrangler.jsonc.
 - Commit Cloudflare binding changes together with generated types from `npx wrangler types`.
 - Prefer feature branches for implementation work after the initial setup commit.
 - Push only after the working tree contains exactly the intended committed changes.
+
+## Testing Practices
+
+- Add or update tests for meaningful behavior changes.
+- Prioritize tests around parsing, validation, leakage prevention, grammar validation, and state transitions.
+- Keep tests focused on observable behavior rather than implementation details.
+- Do not skip tests just because the change is small if it touches data handling or user-facing workflow.
+- Run the relevant test/check command before reporting work complete, usually `npm run check`.
 
 ## Node.js Compatibility
 
