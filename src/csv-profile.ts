@@ -82,6 +82,303 @@ export interface DatasetSummary {
   proposedPreprocessingSteps: PreprocessingStep[];
 }
 
+export type ColumnAssumptionRole =
+  | "feature"
+  | "target"
+  | "identifier"
+  | "timestamp"
+  | "free_text"
+  | "ignore"
+  | "unknown";
+
+export type ColumnAssumptionSemanticType =
+  | "numeric"
+  | "categorical"
+  | "boolean"
+  | "date"
+  | "text"
+  | "id"
+  | "mixed"
+  | "empty";
+
+export type ColumnAssumptionConfidence = "low" | "medium" | "high";
+
+export interface ColumnAssumption {
+  id: string;
+  columnName: string;
+  role: ColumnAssumptionRole;
+  semanticType: ColumnAssumptionSemanticType;
+  confidence: ColumnAssumptionConfidence;
+  evidence: string[];
+  risks: string[];
+  recommendedActions: string[];
+  status: PreprocessingStatus;
+}
+
+export interface IntentOverride {
+  assumptionId: string;
+  columnName: string;
+  role: ColumnAssumptionRole;
+  status: PreprocessingStatus;
+  source: "user";
+  reason: string;
+  updatedAt: string;
+}
+
+export interface DatasetIntent {
+  targetColumn?: string;
+  ignoredColumns: string[];
+  identifierColumns: string[];
+  timestampColumns: string[];
+  textColumns: string[];
+  featureColumns: string[];
+  unknownColumns: string[];
+  acceptedAssumptions: ColumnAssumption[];
+  rejectedAssumptionIds: string[];
+  userOverrides: IntentOverride[];
+  conflicts: string[];
+  warnings: string[];
+}
+
+export type TransformationDecisionType =
+  | "assumption"
+  | "mapping"
+  | "normalization"
+  | "validation"
+  | "exclusion";
+
+export interface TransformationDecision {
+  id: string;
+  type: TransformationDecisionType;
+  target: string;
+  decision: string;
+  reason: string;
+  confidence: ColumnAssumptionConfidence;
+  evidence: string[];
+  alternatives: string[];
+  relatedAssumptionIds: string[];
+  relatedPreprocessingStepIds: string[];
+}
+
+export interface LlmPreprocessingPlan {
+  datasetSummary: string;
+  assumptions: ColumnAssumption[];
+  decisions: TransformationDecision[];
+  globalWarnings: string[];
+  nextQuestions: string[];
+}
+
+export interface AiReviewProfileColumn {
+  name: string;
+  inferredType: InferredColumnType;
+  missingCount: number;
+  missingPercent: number;
+  nonMissingCount: number;
+  uniqueCount: number;
+  uniqueRatio: number;
+  topValues: { value: string; count: number; percent: number }[];
+  sampleValues: string[];
+  profilingNotes: ProfilingNote[];
+}
+
+export interface AiReviewProfile {
+  fileName: string;
+  fileSizeBytes: number;
+  parsedRowCount: number;
+  columnCount: number;
+  warnings: string[];
+  columns: AiReviewProfileColumn[];
+  proposedPreprocessingSteps: Array<{
+    id: string;
+    operation: PreprocessingStep["operation"];
+    target: string;
+    description: string;
+  }>;
+  previewRows: Record<string, PreviewValue>[];
+}
+
+export function buildAiReviewProfile(summary: DatasetSummary): AiReviewProfile {
+  return {
+    fileName: summary.fileName,
+    fileSizeBytes: summary.fileSizeBytes,
+    parsedRowCount: summary.parsedRowCount,
+    columnCount: summary.columns.length,
+    warnings: summary.warnings,
+    columns: summary.columns.map((column) => ({
+      name: column.name,
+      inferredType: column.inferredType,
+      missingCount: column.missingCount,
+      missingPercent:
+        summary.parsedRowCount === 0
+          ? 0
+          : (column.missingCount / summary.parsedRowCount) * 100,
+      nonMissingCount: column.nonMissingCount,
+      uniqueCount: column.uniqueCount,
+      uniqueRatio: column.uniqueRatio,
+      topValues: column.topValues.slice(0, 5),
+      sampleValues: column.sampleValues.slice(0, 5),
+      profilingNotes: column.profilingNotes
+    })),
+    proposedPreprocessingSteps: summary.proposedPreprocessingSteps.map(
+      (step) => {
+        const description = describePreprocessingStep(step);
+        return {
+          id: step.id,
+          operation: step.operation,
+          target:
+            step.operation === "normalize_boolean"
+              ? step.column
+              : step.columns.join(", "),
+          description: `${description.title}: ${description.description}`
+        };
+      }
+    ),
+    previewRows: summary.previewRows.slice(0, 20)
+  };
+}
+
+function uniqueSorted(values: string[]) {
+  return Array.from(new Set(values)).sort((left, right) =>
+    left.localeCompare(right)
+  );
+}
+
+function addRoleColumn(
+  intent: DatasetIntent,
+  role: ColumnAssumptionRole,
+  columnName: string
+) {
+  switch (role) {
+    case "target":
+      intent.targetColumn = intent.targetColumn ?? columnName;
+      break;
+    case "identifier":
+      intent.identifierColumns.push(columnName);
+      break;
+    case "timestamp":
+      intent.timestampColumns.push(columnName);
+      break;
+    case "free_text":
+      intent.textColumns.push(columnName);
+      break;
+    case "ignore":
+      intent.ignoredColumns.push(columnName);
+      break;
+    case "feature":
+      intent.featureColumns.push(columnName);
+      break;
+    case "unknown":
+      intent.unknownColumns.push(columnName);
+      break;
+  }
+}
+
+function pushRoleConflict(
+  conflicts: string[],
+  columnName: string,
+  roles: ColumnAssumptionRole[]
+) {
+  conflicts.push(
+    `${columnName} has multiple accepted roles: ${roles.join(", ")}. Keep only the role that matches the dataset objective.`
+  );
+}
+
+export function buildDatasetIntent(
+  summary: DatasetSummary,
+  assumptions: ColumnAssumption[],
+  userOverrides: IntentOverride[] = []
+): DatasetIntent {
+  const acceptedAssumptions = assumptions.filter(
+    (assumption) => assumption.status === "accepted"
+  );
+  const rejectedAssumptionIds = assumptions
+    .filter((assumption) => assumption.status === "rejected")
+    .map((assumption) => assumption.id);
+  const intent: DatasetIntent = {
+    ignoredColumns: [],
+    identifierColumns: [],
+    timestampColumns: [],
+    textColumns: [],
+    featureColumns: [],
+    unknownColumns: [],
+    acceptedAssumptions,
+    rejectedAssumptionIds,
+    userOverrides,
+    conflicts: [],
+    warnings: []
+  };
+  const rolesByColumn = new Map<string, Set<ColumnAssumptionRole>>();
+  const targetCandidates = acceptedAssumptions.filter(
+    (assumption) => assumption.role === "target"
+  );
+
+  for (const assumption of acceptedAssumptions) {
+    addRoleColumn(intent, assumption.role, assumption.columnName);
+    const roles = rolesByColumn.get(assumption.columnName) ?? new Set();
+    roles.add(assumption.role);
+    rolesByColumn.set(assumption.columnName, roles);
+  }
+
+  if (targetCandidates.length > 1) {
+    intent.conflicts.push(
+      `Multiple target columns are accepted: ${targetCandidates.map((assumption) => assumption.columnName).join(", ")}. Choose one target before generating modeling steps.`
+    );
+  }
+
+  if (targetCandidates.length === 1) {
+    intent.targetColumn = targetCandidates[0].columnName;
+  }
+
+  for (const [columnName, roles] of rolesByColumn) {
+    if (roles.size > 1)
+      pushRoleConflict(intent.conflicts, columnName, [...roles]);
+  }
+
+  const excludedFeatureColumns = new Set([
+    ...intent.identifierColumns,
+    ...intent.ignoredColumns,
+    ...(intent.targetColumn ? [intent.targetColumn] : [])
+  ]);
+  intent.featureColumns = intent.featureColumns.filter(
+    (columnName) => !excludedFeatureColumns.has(columnName)
+  );
+
+  for (const column of summary.columns) {
+    if (
+      column.inferredType === "empty" &&
+      (intent.featureColumns.includes(column.name) ||
+        intent.targetColumn === column.name)
+    ) {
+      intent.conflicts.push(
+        `${column.name} is empty but accepted as ${intent.targetColumn === column.name ? "target" : "feature"}.`
+      );
+    }
+  }
+
+  if (!intent.targetColumn) {
+    intent.warnings.push(
+      "No target column has been accepted yet. Downstream modeling recommendations will remain incomplete."
+    );
+  }
+
+  if (intent.featureColumns.length === 0) {
+    intent.warnings.push(
+      "No feature columns have been accepted yet. Accept feature assumptions or confirm columns manually before generating modeling steps."
+    );
+  }
+
+  return {
+    ...intent,
+    ignoredColumns: uniqueSorted(intent.ignoredColumns),
+    identifierColumns: uniqueSorted(intent.identifierColumns),
+    timestampColumns: uniqueSorted(intent.timestampColumns),
+    textColumns: uniqueSorted(intent.textColumns),
+    featureColumns: uniqueSorted(intent.featureColumns),
+    unknownColumns: uniqueSorted(intent.unknownColumns),
+    rejectedAssumptionIds: uniqueSorted(intent.rejectedAssumptionIds)
+  };
+}
+
 export function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;

@@ -17,7 +17,8 @@
     "types": "wrangler types env.d.ts --include-runtime false",
     "format": "oxfmt --write .",
     "lint": "oxlint src/",
-    "check": "oxfmt --check . && oxlint src/ && tsc"
+    "test": "vitest run --config vitest.config.ts",
+    "check": "oxfmt --check . && oxlint src/ && tsc && vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "@cloudflare/ai-chat": "^0.6.2",
@@ -49,6 +50,7 @@
     "tailwindcss": "^4.2.4",
     "typescript": "^6.0.3",
     "vite": "^8.0.10",
+    "vitest": "^4.1.5",
     "wrangler": "^4.87.0"
   }
 }

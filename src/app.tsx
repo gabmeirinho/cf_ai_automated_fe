@@ -6,6 +6,8 @@ import type { ChatAgent } from "./server";
 import {
   MAX_CSV_SIZE_BYTES,
   applyPreprocessingStepsToPreviewRows,
+  buildAiReviewProfile,
+  buildDatasetIntent,
   describePreprocessingStep,
   formatBytes,
   parseCsvFile,
@@ -13,9 +15,14 @@ import {
   validateCsvFile,
   type ColumnSummary,
   type DatasetSummary,
+  type ColumnAssumption,
+  type LlmPreprocessingPlan,
+  type DatasetIntent,
+  type IntentOverride,
   type ProfilingNoteCode,
   type PreprocessingStep,
-  type PreprocessingStatus
+  type PreprocessingStatus,
+  type TransformationDecision
 } from "./csv-profile";
 import {
   Badge,
@@ -35,6 +42,7 @@ import {
   ChatCircleDotsIcon,
   CheckCircleIcon,
   GearIcon,
+  MagnifyingGlassIcon,
   MoonIcon,
   PaperclipIcon,
   PaperPlaneRightIcon,
@@ -78,6 +86,12 @@ interface ColumnSort {
   key: ColumnSortKey;
   direction: SortDirection;
 }
+
+type AiReviewState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; plan: LlmPreprocessingPlan }
+  | { status: "error"; message: string };
 
 const COLUMN_FILTERS: Array<{
   key: ColumnFilter;
@@ -374,6 +388,28 @@ function AgentChatSidebar() {
   });
 
   const isStreaming = status === "streaming" || status === "submitted";
+
+  useEffect(() => {
+    function handleExternalMessage(event: Event) {
+      const detail = (event as CustomEvent<{ text?: string }>).detail;
+      if (!detail?.text) return;
+
+      sendMessage({
+        role: "user",
+        parts: [{ type: "text", text: detail.text }]
+      });
+    }
+
+    window.addEventListener(
+      "automated-fe:agent-chat-message",
+      handleExternalMessage
+    );
+    return () =>
+      window.removeEventListener(
+        "automated-fe:agent-chat-message",
+        handleExternalMessage
+      );
+  }, [sendMessage]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -810,6 +846,568 @@ function PreviewTable({
   );
 }
 
+function buildReviewChatMessage(
+  summary: DatasetSummary,
+  plan: LlmPreprocessingPlan
+) {
+  const acceptedAssumptions = plan.assumptions.filter(
+    (assumption) => assumption.status === "accepted"
+  );
+  const proposedAssumptions = plan.assumptions.filter(
+    (assumption) => assumption.status === "proposed"
+  );
+
+  return `Use this compact dataset profile and current AI review assumptions as context for our conversation.
+
+Dataset profile:
+${JSON.stringify(buildAiReviewProfile(summary), null, 2)}
+
+Current AI review:
+${JSON.stringify(
+  {
+    datasetSummary: plan.datasetSummary,
+    acceptedAssumptions,
+    proposedAssumptions,
+    decisions: plan.decisions,
+    globalWarnings: plan.globalWarnings,
+    nextQuestions: plan.nextQuestions
+  },
+  null,
+  2
+)}
+
+Canonical dataset intent:
+${JSON.stringify(buildDatasetIntent(summary, plan.assumptions), null, 2)}
+
+When suggesting changes to assumptions, explain briefly and include an optional JSON patch in this shape:
+{
+  "updates": [
+    {
+      "assumptionId": "existing assumption id",
+      "status": "accepted | rejected | proposed",
+      "role": "feature | target | identifier | timestamp | free_text | ignore | unknown",
+      "reason": "short reason"
+    }
+  ]
+}
+Do not assume the patch has been applied until I confirm it.`;
+}
+
+function updateAssumptionStatus(
+  plan: LlmPreprocessingPlan,
+  assumptionId: string,
+  status: PreprocessingStatus
+) {
+  return {
+    ...plan,
+    assumptions: plan.assumptions.map((assumption) =>
+      assumption.id === assumptionId ? { ...assumption, status } : assumption
+    )
+  } satisfies LlmPreprocessingPlan;
+}
+
+function buildIntentOverride(
+  assumption: ColumnAssumption,
+  status: PreprocessingStatus
+) {
+  return {
+    assumptionId: assumption.id,
+    columnName: assumption.columnName,
+    role: assumption.role,
+    status,
+    source: "user",
+    reason: `User marked ${assumption.columnName} as ${status}.`,
+    updatedAt: new Date().toISOString()
+  } satisfies IntentOverride;
+}
+
+function assumptionRoleLabel(role: ColumnAssumption["role"]) {
+  switch (role) {
+    case "free_text":
+      return "Free text";
+    case "identifier":
+      return "Identifiers";
+    case "timestamp":
+      return "Timestamps";
+    case "target":
+      return "Possible target";
+    case "ignore":
+      return "Ignore";
+    case "feature":
+      return "Features";
+    case "unknown":
+      return "Unknown";
+  }
+}
+
+function decisionTypeLabel(type: TransformationDecision["type"]) {
+  switch (type) {
+    case "assumption":
+      return "Assumption";
+    case "mapping":
+      return "Mapping";
+    case "normalization":
+      return "Normalization";
+    case "validation":
+      return "Validation";
+    case "exclusion":
+      return "Exclusion";
+  }
+}
+
+function DecisionTrace({ decisions }: { decisions: TransformationDecision[] }) {
+  if (decisions.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
+      <div className="mb-3">
+        <Text size="xs" variant="secondary" bold>
+          Decision trace
+        </Text>
+        <Text size="xs" variant="secondary">
+          Inspect the model choices without exposing private reasoning.
+        </Text>
+      </div>
+      <div className="grid gap-2">
+        {decisions.map((decision) => (
+          <details
+            key={decision.id}
+            className="rounded-lg border border-kumo-line bg-kumo-elevated"
+          >
+            <summary className="flex cursor-pointer flex-wrap items-center gap-2 px-3 py-2">
+              <Badge variant="secondary">
+                {decisionTypeLabel(decision.type)}
+              </Badge>
+              <Text size="sm" bold>
+                {decision.target}
+              </Text>
+              <Badge
+                variant={
+                  decision.confidence === "high" ? "primary" : "secondary"
+                }
+              >
+                {decision.confidence}
+              </Badge>
+            </summary>
+            <div className="grid gap-3 border-t border-kumo-line px-3 py-3">
+              <div>
+                <Text size="xs" variant="secondary" bold>
+                  Choice
+                </Text>
+                <Text size="sm">{decision.decision}</Text>
+              </div>
+              <div>
+                <Text size="xs" variant="secondary" bold>
+                  Reason
+                </Text>
+                <Text size="sm">{decision.reason}</Text>
+              </div>
+              {(decision.evidence.length > 0 ||
+                decision.alternatives.length > 0) && (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {decision.evidence.length > 0 && (
+                    <div>
+                      <Text size="xs" variant="secondary" bold>
+                        Evidence
+                      </Text>
+                      <ul className="mt-1 grid gap-1">
+                        {decision.evidence.map((item) => (
+                          <li key={item} className="text-xs text-kumo-subtle">
+                            {item}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {decision.alternatives.length > 0 && (
+                    <div>
+                      <Text size="xs" variant="secondary" bold>
+                        Alternatives
+                      </Text>
+                      <ul className="mt-1 grid gap-1">
+                        {decision.alternatives.map((item) => (
+                          <li key={item} className="text-xs text-kumo-subtle">
+                            {item}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+              {(decision.relatedAssumptionIds.length > 0 ||
+                decision.relatedPreprocessingStepIds.length > 0) && (
+                <div className="flex flex-wrap gap-2">
+                  {decision.relatedAssumptionIds.map((id) => (
+                    <Badge key={`assumption-${id}`} variant="secondary">
+                      {id}
+                    </Badge>
+                  ))}
+                  {decision.relatedPreprocessingStepIds.map((id) => (
+                    <Badge key={`step-${id}`} variant="secondary">
+                      {id}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+            </div>
+          </details>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ColumnList({ label, columns }: { label: string; columns: string[] }) {
+  return (
+    <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
+      <Text size="xs" variant="secondary">
+        {label}
+      </Text>
+      <Text size="sm" bold>
+        {columns.length > 0 ? columns.join(", ") : "None"}
+      </Text>
+    </div>
+  );
+}
+
+function DatasetIntentPanel({ intent }: { intent: DatasetIntent }) {
+  return (
+    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+      <div className="mb-3">
+        <Text size="sm" bold>
+          Dataset intent
+        </Text>
+        <Text size="xs" variant="secondary">
+          Accepted assumptions become the canonical state used by downstream
+          planning.
+        </Text>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-3">
+        <ColumnList
+          label="Target"
+          columns={intent.targetColumn ? [intent.targetColumn] : []}
+        />
+        <ColumnList label="Features" columns={intent.featureColumns} />
+        <ColumnList label="Ignored" columns={intent.ignoredColumns} />
+        <ColumnList label="Identifiers" columns={intent.identifierColumns} />
+        <ColumnList label="Timestamps" columns={intent.timestampColumns} />
+        <ColumnList label="Text" columns={intent.textColumns} />
+      </div>
+
+      {(intent.conflicts.length > 0 || intent.warnings.length > 0) && (
+        <div className="mt-3 grid gap-2">
+          {intent.conflicts.length > 0 && (
+            <div className="rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 p-3">
+              <Text size="xs" bold>
+                Conflicts
+              </Text>
+              <ul className="mt-2 grid gap-1">
+                {intent.conflicts.map((conflict) => (
+                  <li key={conflict} className="text-xs text-kumo-subtle">
+                    {conflict}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {intent.warnings.length > 0 && (
+            <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 p-3">
+              <Text size="xs" bold>
+                Intent warnings
+              </Text>
+              <ul className="mt-2 grid gap-1">
+                {intent.warnings.map((warning) => (
+                  <li key={warning} className="text-xs text-kumo-subtle">
+                    {warning}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AiReviewPanel({
+  summary,
+  reviewState,
+  onGenerate,
+  onUpdateAssumption,
+  onSendToChat
+}: {
+  summary: DatasetSummary;
+  reviewState: AiReviewState;
+  onGenerate: () => void;
+  onUpdateAssumption: (
+    assumptionId: string,
+    status: PreprocessingStatus
+  ) => void;
+  onSendToChat: () => void;
+}) {
+  const plan = reviewState.status === "ready" ? reviewState.plan : null;
+  const groupedAssumptions = useMemo(() => {
+    const groups = new Map<ColumnAssumption["role"], ColumnAssumption[]>();
+
+    for (const assumption of plan?.assumptions ?? []) {
+      const current = groups.get(assumption.role) ?? [];
+      current.push(assumption);
+      groups.set(assumption.role, current);
+    }
+
+    const order: ColumnAssumption["role"][] = [
+      "target",
+      "identifier",
+      "timestamp",
+      "free_text",
+      "ignore",
+      "feature",
+      "unknown"
+    ];
+
+    return order
+      .map((role) => [role, groups.get(role) ?? []] as const)
+      .filter(([, assumptions]) => assumptions.length > 0);
+  }, [plan]);
+  const acceptedCount =
+    plan?.assumptions.filter((assumption) => assumption.status === "accepted")
+      .length ?? 0;
+  const rejectedCount =
+    plan?.assumptions.filter((assumption) => assumption.status === "rejected")
+      .length ?? 0;
+
+  return (
+    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <MagnifyingGlassIcon size={16} />
+            <Text size="sm" bold>
+              AI dataset review
+            </Text>
+          </div>
+          <Text size="xs" variant="secondary">
+            Sends profile statistics, samples, and preview rows only.
+          </Text>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          {plan && (
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              icon={<ChatCircleDotsIcon size={14} />}
+              onClick={onSendToChat}
+            >
+              Discuss
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="primary"
+            size="sm"
+            icon={<MagnifyingGlassIcon size={14} />}
+            disabled={reviewState.status === "loading"}
+            onClick={onGenerate}
+          >
+            {reviewState.status === "loading" ? "Reviewing" : "Generate review"}
+          </Button>
+        </div>
+      </div>
+
+      {reviewState.status === "idle" && (
+        <div className="mt-3 rounded-lg border border-dashed border-kumo-line bg-kumo-base px-3 py-4">
+          <Text size="xs" variant="secondary">
+            Generate a structured review for {summary.columns.length} columns
+            before accepting preprocessing assumptions.
+          </Text>
+        </div>
+      )}
+
+      {reviewState.status === "error" && (
+        <div className="mt-3 rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 px-3 py-2">
+          <Text size="sm">{reviewState.message}</Text>
+        </div>
+      )}
+
+      {plan && (
+        <div className="mt-3 grid gap-3">
+          <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
+            <Text size="sm" bold>
+              {plan.datasetSummary}
+            </Text>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Badge variant="secondary">
+                {plan.assumptions.length} assumptions
+              </Badge>
+              <Badge variant="secondary">
+                {plan.decisions.length} decisions
+              </Badge>
+              <Badge variant="secondary">{acceptedCount} accepted</Badge>
+              <Badge variant="secondary">{rejectedCount} rejected</Badge>
+            </div>
+          </div>
+
+          <DecisionTrace decisions={plan.decisions} />
+
+          {plan.globalWarnings.length > 0 && (
+            <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 p-3">
+              <Text size="xs" bold>
+                Global warnings
+              </Text>
+              <ul className="mt-2 grid gap-1">
+                {plan.globalWarnings.map((warning) => (
+                  <li key={warning} className="text-xs text-kumo-subtle">
+                    {warning}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {groupedAssumptions.map(([role, assumptions]) => (
+            <div key={role} className="grid gap-2">
+              <Text size="xs" variant="secondary" bold>
+                {assumptionRoleLabel(role)}
+              </Text>
+              {assumptions.map((assumption) => (
+                <div
+                  key={assumption.id}
+                  className={`rounded-lg border p-3 ${
+                    assumption.status === "accepted"
+                      ? "border-kumo-brand bg-kumo-brand/5"
+                      : assumption.status === "rejected"
+                        ? "border-kumo-line bg-kumo-base opacity-70"
+                        : "border-kumo-line bg-kumo-base"
+                  }`}
+                >
+                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                    <div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Text size="sm" bold>
+                          {assumption.columnName}
+                        </Text>
+                        <Badge variant="secondary">
+                          {assumption.semanticType}
+                        </Badge>
+                        <Badge
+                          variant={
+                            assumption.confidence === "high"
+                              ? "primary"
+                              : "secondary"
+                          }
+                        >
+                          {assumption.confidence}
+                        </Badge>
+                        <Badge
+                          variant={
+                            assumption.status === "accepted"
+                              ? "primary"
+                              : "secondary"
+                          }
+                        >
+                          {assumption.status}
+                        </Badge>
+                      </div>
+                      {assumption.evidence.length > 0 && (
+                        <Text size="xs" variant="secondary">
+                          {assumption.evidence.join(" ")}
+                        </Text>
+                      )}
+                    </div>
+                    <div className="flex gap-2">
+                      <Button
+                        type="button"
+                        variant="primary"
+                        size="sm"
+                        disabled={assumption.status === "accepted"}
+                        onClick={() =>
+                          onUpdateAssumption(assumption.id, "accepted")
+                        }
+                      >
+                        Accept
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="sm"
+                        disabled={assumption.status === "rejected"}
+                        onClick={() =>
+                          onUpdateAssumption(assumption.id, "rejected")
+                        }
+                      >
+                        Reject
+                      </Button>
+                    </div>
+                  </div>
+
+                  {(assumption.risks.length > 0 ||
+                    assumption.recommendedActions.length > 0) && (
+                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
+                      {assumption.risks.length > 0 && (
+                        <div>
+                          <Text size="xs" variant="secondary" bold>
+                            Risks
+                          </Text>
+                          <ul className="mt-1 grid gap-1">
+                            {assumption.risks.map((risk) => (
+                              <li
+                                key={risk}
+                                className="text-xs text-kumo-subtle"
+                              >
+                                {risk}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {assumption.recommendedActions.length > 0 && (
+                        <div>
+                          <Text size="xs" variant="secondary" bold>
+                            Actions
+                          </Text>
+                          <ul className="mt-1 grid gap-1">
+                            {assumption.recommendedActions.map((action) => (
+                              <li
+                                key={action}
+                                className="text-xs text-kumo-subtle"
+                              >
+                                {action}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ))}
+
+          {plan.nextQuestions.length > 0 && (
+            <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
+              <Text size="xs" variant="secondary" bold>
+                Next questions
+              </Text>
+              <ul className="mt-2 grid gap-1">
+                {plan.nextQuestions.map((question) => (
+                  <li key={question} className="text-xs text-kumo-subtle">
+                    {question}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SortableColumnHeader({
   label,
   sortKey,
@@ -857,6 +1455,10 @@ function DatasetWorkspace() {
     key: "notesCount",
     direction: "desc"
   });
+  const [aiReviewState, setAiReviewState] = useState<AiReviewState>({
+    status: "idle"
+  });
+  const [intentOverrides, setIntentOverrides] = useState<IntentOverride[]>([]);
 
   const currentSummary =
     uploadState.status === "ready" ? uploadState.summary : null;
@@ -937,6 +1539,14 @@ function DatasetWorkspace() {
         return left.name.localeCompare(right.name);
       });
   }, [columnFilter, columnSort, currentSummary]);
+  const datasetIntent = useMemo(() => {
+    if (!currentSummary || aiReviewState.status !== "ready") return null;
+    return buildDatasetIntent(
+      currentSummary,
+      aiReviewState.plan.assumptions,
+      intentOverrides
+    );
+  }, [aiReviewState, currentSummary, intentOverrides]);
 
   const updatePreprocessingStatus = useCallback(
     (stepId: string, status: PreprocessingStatus) => {
@@ -958,10 +1568,93 @@ function DatasetWorkspace() {
   const resetWorkspace = useCallback(() => {
     setUploadState({ status: "idle" });
     setPreprocessingStatuses({});
+    setAiReviewState({ status: "idle" });
+    setIntentOverrides([]);
     setColumnFilter("all");
     setColumnSort({ key: "notesCount", direction: "desc" });
     if (csvInputRef.current) csvInputRef.current.value = "";
   }, []);
+
+  const generateAiReview = useCallback(async () => {
+    if (!currentSummary) return;
+
+    setAiReviewState({ status: "loading" });
+    try {
+      const response = await fetch("/api/ai-review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          profile: buildAiReviewProfile(currentSummary)
+        })
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          (data as { error?: string } | null)?.error ||
+            "The AI review could not be generated."
+        );
+      }
+
+      setAiReviewState({
+        status: "ready",
+        plan: data as LlmPreprocessingPlan
+      });
+      setIntentOverrides([]);
+      toasts.add({
+        title: "AI review generated",
+        description: "Review the proposed assumptions before using them."
+      });
+    } catch (error) {
+      setAiReviewState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The AI review could not be generated."
+      });
+    }
+  }, [currentSummary, toasts]);
+
+  const updateAiAssumptionStatus = useCallback(
+    (assumptionId: string, status: PreprocessingStatus) => {
+      setAiReviewState((current) => {
+        if (current.status !== "ready") return current;
+        const assumption = current.plan.assumptions.find(
+          (item) => item.id === assumptionId
+        );
+        if (assumption) {
+          setIntentOverrides((overrides) => [
+            ...overrides.filter(
+              (override) => override.assumptionId !== assumptionId
+            ),
+            buildIntentOverride(assumption, status)
+          ]);
+        }
+        return {
+          status: "ready",
+          plan: updateAssumptionStatus(current.plan, assumptionId, status)
+        };
+      });
+    },
+    []
+  );
+
+  const sendAiReviewToChat = useCallback(() => {
+    if (!currentSummary || aiReviewState.status !== "ready") return;
+
+    window.dispatchEvent(
+      new CustomEvent("automated-fe:agent-chat-message", {
+        detail: {
+          text: buildReviewChatMessage(currentSummary, aiReviewState.plan)
+        }
+      })
+    );
+    toasts.add({
+      title: "Review sent to chat",
+      description: "The agent sidebar now has the current review context."
+    });
+  }, [aiReviewState, currentSummary, toasts]);
 
   const handleCsvFile = useCallback(
     async (file: File) => {
@@ -971,6 +1664,8 @@ function DatasetWorkspace() {
         );
         if (!replace) return;
         setPreprocessingStatuses({});
+        setAiReviewState({ status: "idle" });
+        setIntentOverrides([]);
       }
 
       setUploadState({ status: "validating", fileName: file.name });
@@ -985,6 +1680,8 @@ function DatasetWorkspace() {
         const summary = await parseCsvFile(file);
         setUploadState({ status: "ready", summary });
         setPreprocessingStatuses({});
+        setAiReviewState({ status: "idle" });
+        setIntentOverrides([]);
         toasts.add({
           title: "CSV parsed",
           description: `${summary.parsedRowCount.toLocaleString()} rows, ${summary.columns.length} columns`
@@ -1161,6 +1858,16 @@ function DatasetWorkspace() {
                 ))}
               </div>
             )}
+
+            <AiReviewPanel
+              summary={currentSummary}
+              reviewState={aiReviewState}
+              onGenerate={() => void generateAiReview()}
+              onUpdateAssumption={updateAiAssumptionStatus}
+              onSendToChat={sendAiReviewToChat}
+            />
+
+            {datasetIntent && <DatasetIntentPanel intent={datasetIntent} />}
 
             {proposedPreprocessingSteps.length > 0 && (
               <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 p-3">

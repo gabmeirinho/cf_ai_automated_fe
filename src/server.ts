@@ -3,6 +3,7 @@ import { callable, routeAgentRequest, type Schedule } from "agents";
 import { getSchedulePrompt, scheduleSchema } from "agents/schedule";
 import {
   convertToModelMessages,
+  generateText,
   pruneMessages,
   stepCountIs,
   streamText,
@@ -13,6 +14,389 @@ import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
 const DEFAULT_AI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
+
+const columnAssumptionSchema = z.object({
+  id: z.string(),
+  columnName: z.string(),
+  role: z.enum([
+    "feature",
+    "target",
+    "identifier",
+    "timestamp",
+    "free_text",
+    "ignore",
+    "unknown"
+  ]),
+  semanticType: z.enum([
+    "numeric",
+    "categorical",
+    "boolean",
+    "date",
+    "text",
+    "id",
+    "mixed",
+    "empty"
+  ]),
+  confidence: z.enum(["low", "medium", "high"]),
+  evidence: z.array(z.string()).max(5),
+  risks: z.array(z.string()).max(5),
+  recommendedActions: z.array(z.string()).max(5),
+  status: z.literal("proposed")
+});
+
+const llmColumnAssumptionSchema = columnAssumptionSchema.omit({
+  id: true,
+  status: true
+});
+
+const preprocessingPlanSchema = z.object({
+  datasetSummary: z.string(),
+  assumptions: z.array(columnAssumptionSchema),
+  decisions: z.array(
+    z.object({
+      id: z.string(),
+      type: z.enum([
+        "assumption",
+        "mapping",
+        "normalization",
+        "validation",
+        "exclusion"
+      ]),
+      target: z.string(),
+      decision: z.string(),
+      reason: z.string(),
+      confidence: z.enum(["low", "medium", "high"]),
+      evidence: z.array(z.string()).max(5),
+      alternatives: z.array(z.string()).max(5),
+      relatedAssumptionIds: z.array(z.string()).max(5),
+      relatedPreprocessingStepIds: z.array(z.string()).max(5)
+    })
+  ),
+  globalWarnings: z.array(z.string()).max(8),
+  nextQuestions: z.array(z.string()).max(5)
+});
+const llmReviewSchema = z.object({
+  datasetSummary: z.string(),
+  assumptions: z.array(llmColumnAssumptionSchema),
+  globalWarnings: z.array(z.string()).max(8),
+  nextQuestions: z.array(z.string()).max(5)
+});
+
+const reviewProfileSchema = z.object({
+  fileName: z.string(),
+  fileSizeBytes: z.number(),
+  parsedRowCount: z.number(),
+  columnCount: z.number(),
+  warnings: z.array(z.string()),
+  columns: z.array(
+    z.object({
+      name: z.string(),
+      inferredType: z.string(),
+      missingCount: z.number(),
+      missingPercent: z.number(),
+      nonMissingCount: z.number(),
+      uniqueCount: z.number(),
+      uniqueRatio: z.number(),
+      topValues: z.array(
+        z.object({
+          value: z.string(),
+          count: z.number(),
+          percent: z.number()
+        })
+      ),
+      sampleValues: z.array(z.string()),
+      profilingNotes: z.array(
+        z.object({
+          code: z.string(),
+          message: z.string(),
+          affectedCount: z.number()
+        })
+      )
+    })
+  ),
+  proposedPreprocessingSteps: z.array(
+    z.object({
+      id: z.string(),
+      operation: z.enum([
+        "trim_whitespace",
+        "normalize_boolean",
+        "standardize_missing_tokens"
+      ]),
+      target: z.string(),
+      description: z.string()
+    })
+  ),
+  previewRows: z.array(z.record(z.string(), z.unknown())).max(20)
+});
+
+type ReviewProfile = z.infer<typeof reviewProfileSchema>;
+type PreprocessingPlan = z.infer<typeof preprocessingPlanSchema>;
+type LlmReview = z.infer<typeof llmReviewSchema>;
+
+function extractJsonObject(text: string) {
+  const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = fencedMatch?.[1] ?? text;
+  const start = candidate.indexOf("{");
+  const end = candidate.lastIndexOf("}");
+
+  if (start === -1 || end === -1 || end <= start) return null;
+  return candidate.slice(start, end + 1);
+}
+
+function roleForProfileColumn(
+  column: ReviewProfile["columns"][number]
+): PreprocessingPlan["assumptions"][number]["role"] {
+  const name = column.name.toLowerCase();
+  const notes = new Set(column.profilingNotes.map((note) => note.code));
+
+  if (column.inferredType === "empty") return "ignore";
+  if (notes.has("likely_identifier") || /(^|_)(id|uuid|guid)($|_)/.test(name))
+    return "identifier";
+  if (
+    column.inferredType === "date" ||
+    /(date|time|created|updated|timestamp)/.test(name)
+  ) {
+    return "timestamp";
+  }
+  if (/(target|label|outcome|churn|converted|conversion)/.test(name))
+    return "target";
+  if (column.inferredType === "string" && column.uniqueRatio > 0.75)
+    return "free_text";
+  return "feature";
+}
+
+function semanticTypeForProfileColumn(
+  column: ReviewProfile["columns"][number]
+): PreprocessingPlan["assumptions"][number]["semanticType"] {
+  const role = roleForProfileColumn(column);
+
+  if (role === "identifier") return "id";
+  if (role === "free_text") return "text";
+  if (column.inferredType === "number") return "numeric";
+  if (column.inferredType === "boolean") return "boolean";
+  if (column.inferredType === "date") return "date";
+  if (column.inferredType === "mixed") return "mixed";
+  if (column.inferredType === "empty") return "empty";
+  return "categorical";
+}
+
+function confidenceForProfileColumn(
+  column: ReviewProfile["columns"][number]
+): PreprocessingPlan["assumptions"][number]["confidence"] {
+  if (column.profilingNotes.length > 0 || column.inferredType === "mixed")
+    return "medium";
+  return "high";
+}
+
+function buildDecisionTrace(
+  profile: ReviewProfile,
+  assumptions: PreprocessingPlan["assumptions"]
+) {
+  const assumptionDecisions = assumptions.map((assumption) => ({
+    id: `decision:${assumption.id}`,
+    type: "assumption" as const,
+    target: assumption.columnName,
+    decision: `Treat ${assumption.columnName} as ${assumption.role}.`,
+    reason:
+      assumption.evidence[0] ??
+      "The column role was selected from the compact dataset profile.",
+    confidence: assumption.confidence,
+    evidence: assumption.evidence.slice(0, 5),
+    alternatives:
+      assumption.role === "feature"
+        ? ["target", "ignore", "unknown"]
+        : ["feature", "unknown"],
+    relatedAssumptionIds: [assumption.id],
+    relatedPreprocessingStepIds: []
+  }));
+
+  const preprocessingDecisions = profile.proposedPreprocessingSteps.map(
+    (step) => ({
+      id: `decision:step:${step.id}`,
+      type: "normalization" as const,
+      target: step.target,
+      decision: step.description,
+      reason:
+        "The CSV profiler detected a deterministic cleanup opportunity in the sampled values.",
+      confidence: "high" as const,
+      evidence: [step.description],
+      alternatives: ["Leave raw values unchanged until manually confirmed."],
+      relatedAssumptionIds: [],
+      relatedPreprocessingStepIds: [step.id]
+    })
+  );
+
+  return [...assumptionDecisions, ...preprocessingDecisions];
+}
+
+function buildPreprocessingPlan(
+  profile: ReviewProfile,
+  review: LlmReview & { assumptions: PreprocessingPlan["assumptions"] }
+): PreprocessingPlan {
+  return {
+    ...review,
+    decisions: buildDecisionTrace(profile, review.assumptions)
+  };
+}
+
+function buildLocalAssumption(
+  column: ReviewProfile["columns"][number]
+): PreprocessingPlan["assumptions"][number] {
+  const role = roleForProfileColumn(column);
+
+  return {
+    id: `column:${column.name}`,
+    columnName: column.name,
+    role,
+    semanticType: semanticTypeForProfileColumn(column),
+    confidence: confidenceForProfileColumn(column),
+    evidence: [
+      `Inferred type: ${column.inferredType}.`,
+      `Missing values: ${column.missingPercent.toFixed(1)}%.`,
+      `Unique ratio: ${column.uniqueRatio.toFixed(2)}.`
+    ],
+    risks: column.profilingNotes.slice(0, 3).map((note) => note.message),
+    recommendedActions:
+      role === "identifier"
+        ? ["Exclude from model features unless the identifier carries meaning."]
+        : role === "ignore"
+          ? ["Keep excluded unless the column is populated in the source data."]
+          : ["Confirm this role against the dataset objective."],
+    status: "proposed"
+  };
+}
+
+function normalizeLlmReview(
+  profile: ReviewProfile,
+  review: LlmReview
+): LlmReview & { assumptions: PreprocessingPlan["assumptions"] } {
+  const columnsByName = new Map(
+    profile.columns.map((column) => [column.name, column])
+  );
+  const seen = new Set<string>();
+  const assumptions: PreprocessingPlan["assumptions"] = [];
+
+  for (const assumption of review.assumptions) {
+    if (seen.has(assumption.columnName)) continue;
+    if (!columnsByName.has(assumption.columnName)) continue;
+
+    seen.add(assumption.columnName);
+    assumptions.push({
+      ...assumption,
+      id: `column:${assumption.columnName}`,
+      status: "proposed"
+    });
+  }
+
+  for (const column of profile.columns) {
+    if (!seen.has(column.name)) assumptions.push(buildLocalAssumption(column));
+  }
+
+  return {
+    ...review,
+    assumptions
+  };
+}
+
+function buildFallbackPreprocessingPlan(profile: ReviewProfile) {
+  const assumptions = profile.columns.map(buildLocalAssumption);
+
+  return buildPreprocessingPlan(profile, {
+    datasetSummary: `${profile.fileName} has ${profile.parsedRowCount.toLocaleString()} rows and ${profile.columnCount} columns.`,
+    assumptions,
+    globalWarnings: [
+      "AI review response could not be parsed. Showing a local fallback review from deterministic profile statistics.",
+      ...profile.warnings
+    ].slice(0, 8),
+    nextQuestions: [
+      "Which column is the target outcome?",
+      "Are identifier columns safe to exclude from model features?"
+    ]
+  });
+}
+
+function parseLlmReviewText(text: string) {
+  const jsonText = extractJsonObject(text);
+  if (!jsonText) {
+    return {
+      success: false as const,
+      error: "The model did not return a JSON object."
+    };
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText);
+    const validated = llmReviewSchema.safeParse(parsed);
+
+    if (!validated.success) {
+      return {
+        success: false as const,
+        error: z.prettifyError(validated.error)
+      };
+    }
+
+    return {
+      success: true as const,
+      review: validated.data
+    };
+  } catch (error) {
+    return {
+      success: false as const,
+      error:
+        error instanceof Error ? error.message : "The JSON could not be parsed."
+    };
+  }
+}
+
+function buildReviewPrompt(profile: ReviewProfile) {
+  return `Return JSON only. Do not use Markdown. Do not include a choices array. Do not include prose before or after the JSON.
+
+Use this exact JSON shape:
+{
+  "datasetSummary": "short plain English summary",
+  "assumptions": [
+    {
+      "columnName": "exact column name from input",
+      "role": "feature | target | identifier | timestamp | free_text | ignore | unknown",
+      "semanticType": "numeric | categorical | boolean | date | text | id | mixed | empty",
+      "confidence": "low | medium | high",
+      "evidence": ["short evidence from profile"],
+      "risks": ["short risk, or empty array"],
+      "recommendedActions": ["short recommended action"]
+    }
+  ],
+  "globalWarnings": ["dataset-level warning, or empty array"],
+  "nextQuestions": ["question for the user, or empty array"]
+}
+
+Example response:
+{
+  "datasetSummary": "customers.csv has 500 rows and 6 columns. The profile suggests an identifier, timestamp, and candidate target column.",
+  "assumptions": [
+    {
+      "columnName": "customer_id",
+      "role": "identifier",
+      "semanticType": "id",
+      "confidence": "high",
+      "evidence": ["The column name contains id.", "The unique ratio is 1.00."],
+      "risks": ["Using this as a feature may leak row identity."],
+      "recommendedActions": ["Exclude from model features unless it encodes useful grouping."]
+    }
+  ],
+  "globalWarnings": [],
+  "nextQuestions": ["Which column is the target outcome?"]
+}
+
+Rules:
+- Use every columnName exactly as provided in the input.
+- Prefer "unknown" with low confidence when evidence is weak.
+- Identifier columns should usually not be model features.
+- Target columns should not be treated as features.
+- Base conclusions only on profile statistics, profiling notes, top values, sample values, proposed preprocessing steps, and preview rows.
+
+Input profile:
+${JSON.stringify(profile)}`;
+}
 
 function inlineDataUrls(messages: ModelMessage[]): ModelMessage[] {
   return messages.map((message) => {
@@ -36,6 +420,52 @@ function inlineDataUrls(messages: ModelMessage[]): ModelMessage[] {
       })
     };
   });
+}
+
+async function handleAiReview(request: Request, env: Env) {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const parsedProfile = reviewProfileSchema.safeParse(
+    (body as { profile?: unknown } | null)?.profile
+  );
+
+  if (!parsedProfile.success) {
+    return Response.json(
+      { error: "Request must include a valid compact dataset profile." },
+      { status: 400 }
+    );
+  }
+
+  const workersai = createWorkersAI({ binding: env.AI });
+  const model = env.AI_MODEL || DEFAULT_AI_MODEL;
+  const profile = parsedProfile.data;
+
+  const result = await generateText({
+    model: workersai(model),
+    system:
+      "You review compact CSV profiles for preprocessing planning. You output JSON only.",
+    prompt: buildReviewPrompt(profile)
+  });
+  const parsedReview = parseLlmReviewText(result.text);
+
+  if (!parsedReview.success) {
+    console.warn("AI review response could not be parsed", {
+      error: parsedReview.error,
+      generatedText: result.text.slice(0, 500)
+    });
+
+    return Response.json(buildFallbackPreprocessingPlan(profile));
+  }
+
+  return Response.json(
+    buildPreprocessingPlan(
+      profile,
+      normalizeLlmReview(profile, parsedReview.review)
+    )
+  );
 }
 
 export class ChatAgent extends AIChatAgent<Env> {
@@ -187,6 +617,11 @@ If the user asks to schedule a task or reminder, use the schedule tool.`,
 
 export default {
   async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/api/ai-review") {
+      return await handleAiReview(request, env);
+    }
+
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
