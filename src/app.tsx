@@ -828,7 +828,7 @@ function Chat() {
 
       {/* Active workspace */}
       <section className="border-b border-kumo-line bg-kumo-base">
-        <div className="max-w-5xl mx-auto px-5 py-5 grid gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="max-w-5xl mx-auto px-5 py-5 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_320px]">
           <Surface
             className={`rounded-xl ring p-4 transition-colors ${
               isCsvDragging
@@ -1166,7 +1166,7 @@ function Chat() {
             </div>
           </Surface>
 
-          <Surface className="rounded-xl ring ring-kumo-line p-4">
+          <Surface className="self-start rounded-xl ring ring-kumo-line p-4">
             <div className="space-y-4">
               <div>
                 <Text size="lg" bold>
