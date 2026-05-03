@@ -49,23 +49,13 @@ const llmColumnAssumptionSchema = columnAssumptionSchema.omit({
   status: true
 });
 
-const preprocessingSuggestionActionSchema = z.enum([
-  "none",
-  "drop",
-  "fill_mean",
-  "fill_median",
-  "fill_mode",
-  "one_hot_encode",
-  "trim_whitespace",
-  "standardize_missing",
-  "normalize_boolean",
-  "split_name"
-]);
+const preprocessingSuggestionActionSchema = z.string().trim().min(1).max(80);
 
 const preprocessingSuggestionSchema = z.object({
   columnName: z.string(),
   action: preprocessingSuggestionActionSchema,
   reason: z.string(),
+  implementation: z.string().optional(),
   alternatives: z.array(preprocessingSuggestionActionSchema).max(5)
 });
 
@@ -522,6 +512,19 @@ function uniqueActions(actions: PreprocessingAction[]) {
   return Array.from(new Set(actions));
 }
 
+const PREPROCESSING_ACTIONS = {
+  none: "No step",
+  drop: "Drop column",
+  fillMean: "Fill missing values with the mean",
+  fillMedian: "Fill missing values with the median",
+  fillMode: "Fill missing values with the most common value",
+  oneHotEncode: "One-hot encode categories",
+  trimWhitespace: "Trim whitespace",
+  standardizeMissing: "Standardize missing-value tokens",
+  normalizeBoolean: "Normalize boolean values",
+  splitName: "Split full names into parts"
+} as const;
+
 function isLikelyNameColumn(column: ReviewProfile["columns"][number]) {
   const name = column.name.toLowerCase();
   return (
@@ -537,45 +540,51 @@ function plausiblePreprocessingActions(
   column: ReviewProfile["columns"][number],
   assumption: PreprocessingPlan["assumptions"][number]
 ) {
-  const actions: PreprocessingAction[] = ["none"];
+  const actions: PreprocessingAction[] = [PREPROCESSING_ACTIONS.none];
 
   if (assumption.role === "identifier" || assumption.role === "ignore") {
-    actions.push("drop");
+    actions.push(PREPROCESSING_ACTIONS.drop);
   }
   if (
     column.profilingNotes.some(
       (note) => note.code === "empty_column" || note.code === "constant_column"
     )
   ) {
-    actions.push("drop");
+    actions.push(PREPROCESSING_ACTIONS.drop);
   }
   if (column.profilingNotes.some((note) => note.code === "missing_like_tokens"))
-    actions.push("standardize_missing");
+    actions.push(PREPROCESSING_ACTIONS.standardizeMissing);
   if (
     column.profilingNotes.some(
       (note) => note.code === "leading_trailing_whitespace"
     )
   ) {
-    actions.push("trim_whitespace");
+    actions.push(PREPROCESSING_ACTIONS.trimWhitespace);
   }
-  if (column.inferredType === "boolean") actions.push("normalize_boolean");
+  if (column.inferredType === "boolean")
+    actions.push(PREPROCESSING_ACTIONS.normalizeBoolean);
   if (column.missingCount > 0 && column.inferredType === "number") {
-    actions.push("fill_mean", "fill_median");
+    actions.push(
+      PREPROCESSING_ACTIONS.fillMean,
+      PREPROCESSING_ACTIONS.fillMedian
+    );
   }
   if (
     column.missingCount > 0 &&
     (column.inferredType === "string" || column.inferredType === "boolean")
   ) {
-    actions.push("fill_mode");
+    actions.push(PREPROCESSING_ACTIONS.fillMode);
   }
   if (
     column.inferredType === "string" &&
     column.uniqueCount > 1 &&
     column.uniqueRatio <= 0.2
   ) {
-    actions.push("one_hot_encode");
+    actions.push(PREPROCESSING_ACTIONS.oneHotEncode);
   }
-  if (isLikelyNameColumn(column)) actions.push("split_name", "drop");
+  if (isLikelyNameColumn(column)) {
+    actions.push(PREPROCESSING_ACTIONS.splitName, PREPROCESSING_ACTIONS.drop);
+  }
 
   return uniqueActions(actions);
 }
@@ -585,56 +594,59 @@ function defaultPreprocessingSuggestion(
   assumption: PreprocessingPlan["assumptions"][number]
 ): PreprocessingPlan["preprocessingSuggestions"][number] {
   const actions = plausiblePreprocessingActions(column, assumption);
-  let action = actions[0] ?? "none";
+  let action = actions[0] ?? PREPROCESSING_ACTIONS.none;
   let reason = "No specific preprocessing needed from the current profile.";
 
   if (assumption.role === "identifier" || assumption.role === "ignore") {
-    action = "drop";
+    action = PREPROCESSING_ACTIONS.drop;
     reason = "The column is not expected to be useful as a model feature.";
   } else if (isLikelyNameColumn(column)) {
-    action = "split_name";
+    action = PREPROCESSING_ACTIONS.splitName;
     reason =
       "Sample values look like full names, which can be split into reusable parts.";
   } else if (
     column.profilingNotes.some((note) => note.code === "empty_column")
   ) {
-    action = "drop";
+    action = PREPROCESSING_ACTIONS.drop;
     reason = "The column has no non-empty sampled values.";
   } else if (
     column.profilingNotes.some((note) => note.code === "constant_column")
   ) {
-    action = "drop";
+    action = PREPROCESSING_ACTIONS.drop;
     reason = "The column is constant in the sampled rows.";
   } else if (
     column.profilingNotes.some((note) => note.code === "missing_like_tokens")
   ) {
-    action = "standardize_missing";
+    action = PREPROCESSING_ACTIONS.standardizeMissing;
     reason = "The column contains tokens that commonly represent missingness.";
   } else if (
     column.profilingNotes.some(
       (note) => note.code === "leading_trailing_whitespace"
     )
   ) {
-    action = "trim_whitespace";
+    action = PREPROCESSING_ACTIONS.trimWhitespace;
     reason = "Sample values include leading or trailing whitespace.";
   } else if (column.inferredType === "boolean") {
-    action = "normalize_boolean";
+    action = PREPROCESSING_ACTIONS.normalizeBoolean;
     reason = "Boolean-like values should use one consistent representation.";
   } else if (column.missingCount > 0 && column.inferredType === "number") {
-    action = column.missingPercent >= 20 ? "fill_median" : "fill_mean";
+    action =
+      column.missingPercent >= 20
+        ? PREPROCESSING_ACTIONS.fillMedian
+        : PREPROCESSING_ACTIONS.fillMean;
     reason =
       column.missingPercent >= 20
         ? "Median imputation is robust for numeric columns with material missingness."
         : "Mean imputation is a simple baseline for low numeric missingness.";
   } else if (column.missingCount > 0 && column.inferredType === "string") {
-    action = "fill_mode";
+    action = PREPROCESSING_ACTIONS.fillMode;
     reason = "Categorical missing values can use the most frequent value.";
   } else if (
     column.inferredType === "string" &&
     column.uniqueCount > 1 &&
     column.uniqueRatio <= 0.2
   ) {
-    action = "one_hot_encode";
+    action = PREPROCESSING_ACTIONS.oneHotEncode;
     reason = "Low-cardinality categorical values are suitable for encoding.";
   }
 
@@ -642,6 +654,10 @@ function defaultPreprocessingSuggestion(
     columnName: column.name,
     action,
     reason,
+    implementation:
+      action === PREPROCESSING_ACTIONS.none
+        ? "Leave the column unchanged."
+        : `${action} before modeling.`,
     alternatives: actions.filter((candidate) => candidate !== action)
   };
 }
@@ -679,15 +695,6 @@ function normalizeLlmReview(
   const assumptionsByColumn = new Map(
     assumptions.map((assumption) => [assumption.columnName, assumption])
   );
-  const plausibleByColumn = new Map(
-    profile.columns.map((column) => [
-      column.name,
-      plausiblePreprocessingActions(
-        column,
-        assumptionsByColumn.get(column.name) ?? buildLocalAssumption(column)
-      )
-    ])
-  );
   const suggestionSeen = new Set<string>();
   const preprocessingSuggestions: PreprocessingPlan["preprocessingSuggestions"] =
     [];
@@ -699,16 +706,11 @@ function normalizeLlmReview(
 
     const assumption =
       assumptionsByColumn.get(column.name) ?? buildLocalAssumption(column);
-    const plausible = plausibleByColumn.get(column.name) ?? ["none"];
     const fallback = defaultPreprocessingSuggestion(column, assumption);
-    const action = plausible.includes(suggestion.action)
-      ? suggestion.action
-      : fallback.action;
+    const action = suggestion.action || fallback.action;
     const alternatives = uniqueActions([
       action,
-      ...suggestion.alternatives.filter((candidate) =>
-        plausible.includes(candidate)
-      ),
+      ...suggestion.alternatives,
       ...fallback.alternatives
     ]).filter((candidate) => candidate !== action);
 
@@ -717,6 +719,7 @@ function normalizeLlmReview(
       columnName: suggestion.columnName,
       action,
       reason: suggestion.reason || fallback.reason,
+      implementation: suggestion.implementation || fallback.implementation,
       alternatives
     });
   }
@@ -980,21 +983,23 @@ Use this exact JSON shape:
   "preprocessingSuggestions": [
     {
       "columnName": "exact column name from input",
-      "action": "none | drop | fill_mean | fill_median | fill_mode | one_hot_encode | trim_whitespace | standardize_missing | normalize_boolean | split_name",
+      "action": "short human-readable step name",
       "reason": "why this step fits this column",
-      "alternatives": ["other plausible actions only"]
+      "implementation": "one concise sentence describing how to apply it",
+      "alternatives": ["other plausible step names only"]
     }
   ]
 }
 
 Rules:
 - Include one preprocessingSuggestions entry for every input column.
-- Only suggest plausible preprocessing actions for the column type and samples.
-- Do not suggest fill_mean or fill_median for boolean or string columns.
-- Do not suggest fill_mode for numeric columns.
-- Use split_name when the column name or sample values look like person names.
+- Prefer specific, dataset-aware recommendations over generic labels.
+- You may invent custom transformations when the column name, values, or profile justify them.
+- Keep recommendations practical and implementable from the available column values.
+- Do not suggest numeric imputation for boolean or string columns.
+- Do not suggest categorical mode imputation for numeric columns.
 - Use drop for identifiers, empty columns, constant columns, or clearly irrelevant high-cardinality text.
-- Keep target columns as "none".
+- Keep target columns as "No step".
 
 Column assumptions:
 ${JSON.stringify(review.assumptions)}
@@ -1032,9 +1037,10 @@ Use this exact JSON shape:
   "preprocessingSuggestions": [
     {
       "columnName": "exact kept column name from input",
-      "action": "none | drop | fill_mean | fill_median | fill_mode | one_hot_encode | trim_whitespace | standardize_missing | normalize_boolean | split_name",
+      "action": "short human-readable step name, such as Robust median imputation, Parse cabin deck, Bucket rare categories, or No step",
       "reason": "why this step fits this column",
-      "alternatives": ["other plausible actions only"]
+      "implementation": "one concise sentence describing how to apply it",
+      "alternatives": ["other plausible step names only"]
     }
   ]
 }
@@ -1043,10 +1049,12 @@ Rules:
 - Include one preprocessingSuggestions entry for every kept feature column.
 - Do not include dropped columns.
 - Do not include the target column.
-- Only suggest plausible preprocessing actions for the column type and samples.
-- Do not suggest fill_mean or fill_median for boolean or string columns.
-- Do not suggest fill_mode for numeric columns.
-- Use split_name when the column name or sample values look like person names.
+- Prefer specific, dataset-aware recommendations over generic labels.
+- You may invent custom transformations when the column name, values, or profile justify them.
+- Keep recommendations practical and implementable from the available column values.
+- Do not suggest numeric imputation for boolean or string columns.
+- Do not suggest categorical mode imputation for numeric columns.
+- Use "No step" only when the column should pass through unchanged.
 
 Kept columns:
 ${JSON.stringify(keptColumns)}
@@ -1270,20 +1278,15 @@ async function handlePreprocessingReview(request: Request, env: Env) {
       const suggestion = suggestionsByColumn.get(columnName);
       if (!suggestion) return fallback;
 
-      const plausible = plausiblePreprocessingActions(
-        column,
-        buildLocalAssumption(column)
-      );
-      const action = plausible.includes(suggestion.action)
-        ? suggestion.action
-        : fallback.action;
+      const action = suggestion.action || fallback.action;
 
       return {
         columnName,
         action,
         reason: suggestion.reason || fallback.reason,
+        implementation: suggestion.implementation || fallback.implementation,
         alternatives: uniqueActions([
-          ...suggestion.alternatives.filter((item) => plausible.includes(item)),
+          ...suggestion.alternatives,
           ...fallback.alternatives
         ]).filter((item) => item !== action)
       };

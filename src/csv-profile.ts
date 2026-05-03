@@ -160,22 +160,13 @@ export interface TransformationDecision {
   relatedPreprocessingStepIds: string[];
 }
 
-export type PreprocessingSuggestionAction =
-  | "none"
-  | "drop"
-  | "fill_mean"
-  | "fill_median"
-  | "fill_mode"
-  | "one_hot_encode"
-  | "trim_whitespace"
-  | "standardize_missing"
-  | "normalize_boolean"
-  | "split_name";
+export type PreprocessingSuggestionAction = string;
 
 export interface PreprocessingSuggestion {
   columnName: string;
   action: PreprocessingSuggestionAction;
   reason: string;
+  implementation?: string;
   alternatives: PreprocessingSuggestionAction[];
 }
 

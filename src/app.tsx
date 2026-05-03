@@ -922,28 +922,18 @@ function columnActionLabel(action: ColumnPreparationAction) {
 }
 
 function preprocessingChoiceLabel(choice: PreprocessingChoice) {
-  switch (choice) {
-    case "none":
-      return "No step";
-    case "drop":
-      return "Drop column";
-    case "fill_mean":
-      return "Fill mean";
-    case "fill_median":
-      return "Fill median";
-    case "fill_mode":
-      return "Fill mode";
-    case "one_hot_encode":
-      return "One-hot encode";
-    case "trim_whitespace":
-      return "Trim whitespace";
-    case "standardize_missing":
-      return "Standardize missing";
-    case "normalize_boolean":
-      return "Normalize boolean";
-    case "split_name":
-      return "Split name";
-  }
+  if (isNoPreprocessingChoice(choice)) return "No step";
+  return choice;
+}
+
+function isNoPreprocessingChoice(choice: PreprocessingChoice) {
+  const normalized = choice.trim().toLowerCase().replaceAll("_", " ");
+  return normalized === "none" || normalized === "no step";
+}
+
+function isDropPreprocessingChoice(choice: PreprocessingChoice) {
+  const normalized = choice.trim().toLowerCase().replaceAll("_", " ");
+  return normalized === "drop" || normalized === "drop column";
 }
 
 function isLikelyNameColumn(column: ColumnSummary) {
@@ -967,7 +957,7 @@ function getSuggestedPreprocessingChoice(
 
   if (column.name === targetColumn) {
     return {
-      choice: "none",
+      choice: "No step",
       reason: "Target column is kept separate from feature preprocessing."
     };
   }
@@ -976,38 +966,41 @@ function getSuggestedPreprocessingChoice(
     hasProfilingNote(column, "constant_column")
   ) {
     return {
-      choice: "drop",
+      choice: "Drop column",
       reason: "The column is unlikely to add useful feature signal."
     };
   }
   if (isLikelyNameColumn(column)) {
     return {
-      choice: "split_name",
+      choice: "Split full names into parts",
       reason:
         "Sample values look like full names, which can be split into reusable parts."
     };
   }
   if (hasProfilingNote(column, "missing_like_tokens")) {
     return {
-      choice: "standardize_missing",
+      choice: "Standardize missing-value tokens",
       reason: "The profiler found tokens that commonly mean missing values."
     };
   }
   if (hasProfilingNote(column, "leading_trailing_whitespace")) {
     return {
-      choice: "trim_whitespace",
+      choice: "Trim whitespace",
       reason: "Sampled values contain leading or trailing whitespace."
     };
   }
   if (column.inferredType === "boolean") {
     return {
-      choice: "normalize_boolean",
+      choice: "Normalize boolean values",
       reason: "Boolean-like values should use one consistent representation."
     };
   }
   if (missingPercent > 0 && column.inferredType === "number") {
     return {
-      choice: missingPercent >= 0.2 ? "fill_median" : "fill_mean",
+      choice:
+        missingPercent >= 0.2
+          ? "Fill missing values with the median"
+          : "Fill missing values with the mean",
       reason:
         missingPercent >= 0.2
           ? "Numeric missingness is material; median is robust to skew."
@@ -1016,7 +1009,7 @@ function getSuggestedPreprocessingChoice(
   }
   if (missingPercent > 0 && column.inferredType === "string") {
     return {
-      choice: "fill_mode",
+      choice: "Fill missing values with the most common value",
       reason: "Categorical missing values can use the most frequent value."
     };
   }
@@ -1026,12 +1019,12 @@ function getSuggestedPreprocessingChoice(
     column.uniqueRatio <= 0.2
   ) {
     return {
-      choice: "one_hot_encode",
+      choice: "One-hot encode categories",
       reason: "Low-cardinality categorical values are suitable for encoding."
     };
   }
   return {
-    choice: "none",
+    choice: "No step",
     reason: "No required cleanup detected."
   };
 }
@@ -1048,6 +1041,7 @@ function getPlanPreprocessingSuggestion(
     return {
       choice: suggestion.action,
       reason: suggestion.reason,
+      implementation: suggestion.implementation,
       options: Array.from(
         new Set([suggestion.action, ...suggestion.alternatives])
       )
@@ -1057,6 +1051,9 @@ function getPlanPreprocessingSuggestion(
   const fallback = getSuggestedPreprocessingChoice(column, targetColumn);
   return {
     ...fallback,
+    implementation: isNoPreprocessingChoice(fallback.choice)
+      ? "Leave the column unchanged."
+      : `${fallback.choice} for this column.`,
     options: [fallback.choice]
   };
 }
@@ -1182,18 +1179,64 @@ function PreparationReviewPanel({
     (item) =>
       item.column.name !== targetColumn &&
       item.selectedAction === "feature" &&
-      item.selectedPreprocessing !== "none"
+      !isNoPreprocessingChoice(item.selectedPreprocessing)
   );
+  const workflowSteps = [
+    {
+      label: "1. Target",
+      value: targetColumn ?? "Choose outcome",
+      complete: Boolean(targetColumn)
+    },
+    {
+      label: "2. Columns",
+      value: isSelectionFinalized
+        ? `${featureColumns.length} kept`
+        : `${reviewColumns.length} review`,
+      complete: isSelectionFinalized
+    },
+    {
+      label: "3. Preprocessing",
+      value:
+        preprocessingState.status === "ready"
+          ? `${activePreprocessing.length} steps`
+          : "Not generated",
+      complete: preprocessingState.status === "ready"
+    }
+  ];
 
   return (
     <div className="grid gap-4">
+      {plan && (
+        <div className="grid gap-2 sm:grid-cols-3">
+          {workflowSteps.map((step) => (
+            <div
+              key={step.label}
+              className={`rounded-lg border px-3 py-2 ${
+                step.complete
+                  ? "border-kumo-brand/40 bg-kumo-brand/10"
+                  : "border-kumo-line bg-kumo-elevated"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <Text size="xs" variant="secondary">
+                  {step.label}
+                </Text>
+                {step.complete && <CheckCircleIcon size={14} />}
+              </div>
+              <Text size="sm" bold>
+                {step.value}
+              </Text>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <div className="flex items-center gap-2">
               <MagnifyingGlassIcon size={16} />
               <Text size="sm" bold>
-                Target variable
+                1. Choose target
               </Text>
             </div>
             <Text size="xs" variant="secondary">
@@ -1273,7 +1316,7 @@ function PreparationReviewPanel({
                       onAcceptTarget(suggestedTarget.columnName);
                   }}
                 >
-                  Accept
+                  Use suggested target
                 </Button>
                 <SelectBox
                   value={selectedTarget}
@@ -1299,7 +1342,7 @@ function PreparationReviewPanel({
             <div className="flex flex-col gap-2 border-b border-kumo-line p-3 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <Text size="sm" bold>
-                  Column proposals
+                  2. Keep or drop features
                 </Text>
                 <Text size="xs" variant="secondary">
                   {featureColumns.length} used, {droppedColumns.length} dropped
@@ -1401,7 +1444,7 @@ function PreparationReviewPanel({
                 {isSelectionFinalized
                   ? "Column selection is finished. Dropped columns will be excluded from preprocessing."
                   : reviewColumns.length > 0
-                    ? "Resolve reviewed columns before finishing the selection."
+                    ? "Choose Use or Drop for reviewed columns before finishing."
                     : "Finish the selection to lock the kept columns for preprocessing."}
               </Text>
               <Button
@@ -1428,7 +1471,7 @@ function PreparationReviewPanel({
                   Preprocessing proposals
                 </Text>
                 <Text size="xs" variant="secondary">
-                  Finalize kept columns, then ask the model for preprocessing.
+                  3. Ask the model for custom, dataset-aware steps.
                 </Text>
               </div>
               <Button
@@ -1466,9 +1509,9 @@ function PreparationReviewPanel({
                   <thead className="bg-kumo-base text-kumo-subtle">
                     <tr>
                       <th className="px-3 py-2 font-medium">Column</th>
-                      <th className="px-3 py-2 font-medium">Suggested step</th>
-                      <th className="px-3 py-2 font-medium">Reason</th>
-                      <th className="px-3 py-2 font-medium">Decision</th>
+                      <th className="px-3 py-2 font-medium">Recommendation</th>
+                      <th className="px-3 py-2 font-medium">Why</th>
+                      <th className="px-3 py-2 font-medium">Selected</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-kumo-line">
@@ -1479,6 +1522,7 @@ function PreparationReviewPanel({
                         suggestedPreprocessing,
                         selectedPreprocessing
                       }) =>
+                        column.name !== targetColumn &&
                         selectedAction === "feature" ? (
                           <tr key={column.name}>
                             <td className="px-3 py-2 font-medium text-kumo-default">
@@ -1487,7 +1531,9 @@ function PreparationReviewPanel({
                             <td className="px-3 py-2">
                               <Badge
                                 variant={
-                                  suggestedPreprocessing.choice === "none"
+                                  isNoPreprocessingChoice(
+                                    suggestedPreprocessing.choice
+                                  )
                                     ? "secondary"
                                     : "primary"
                                 }
@@ -1497,8 +1543,15 @@ function PreparationReviewPanel({
                                 )}
                               </Badge>
                             </td>
-                            <td className="max-w-md px-3 py-2 text-kumo-subtle">
-                              {suggestedPreprocessing.reason}
+                            <td className="max-w-md px-3 py-2">
+                              <div className="grid gap-1 text-kumo-subtle">
+                                <span>{suggestedPreprocessing.reason}</span>
+                                {suggestedPreprocessing.implementation && (
+                                  <span className="text-xs">
+                                    {suggestedPreprocessing.implementation}
+                                  </span>
+                                )}
+                              </div>
                             </td>
                             <td className="px-3 py-2">
                               <SelectBox
@@ -1511,14 +1564,17 @@ function PreparationReviewPanel({
                                   )
                                 }
                               >
-                                <option value="none">No step</option>
-                                {suggestedPreprocessing.options
-                                  .filter((choice) => choice !== "none")
-                                  .map((choice) => (
-                                    <option key={choice} value={choice}>
-                                      {preprocessingChoiceLabel(choice)}
-                                    </option>
-                                  ))}
+                                {Array.from(
+                                  new Set([
+                                    selectedPreprocessing,
+                                    ...suggestedPreprocessing.options,
+                                    "No step"
+                                  ])
+                                ).map((choice) => (
+                                  <option key={choice} value={choice}>
+                                    {preprocessingChoiceLabel(choice)}
+                                  </option>
+                                ))}
                               </SelectBox>
                             </td>
                           </tr>
@@ -1816,7 +1872,7 @@ function DatasetWorkspace() {
     }));
     setPreprocessingChoices((current) => ({
       ...current,
-      [columnName]: "none"
+      [columnName]: "No step"
     }));
   }, []);
 
@@ -1832,7 +1888,7 @@ function DatasetWorkspace() {
     }));
     setPreprocessingChoices((current) => ({
       ...current,
-      [columnName]: "none"
+      [columnName]: "No step"
     }));
   }, []);
 
@@ -1847,7 +1903,7 @@ function DatasetWorkspace() {
       if (action === "drop") {
         setPreprocessingChoices((current) => ({
           ...current,
-          [columnName]: "none"
+          [columnName]: "No step"
         }));
       }
     },
@@ -1881,7 +1937,7 @@ function DatasetWorkspace() {
         ...current,
         [columnName]: choice
       }));
-      if (choice === "drop") {
+      if (isDropPreprocessingChoice(choice)) {
         setColumnActions((current) => ({
           ...current,
           [columnName]: "drop"
@@ -1932,7 +1988,7 @@ function DatasetWorkspace() {
             const suggestion = plan.preprocessingSuggestions.find(
               (item) => item.columnName === columnName
             );
-            return [columnName, suggestion?.action ?? "none"];
+            return [columnName, suggestion?.action ?? "No step"];
           })
         )
       );
