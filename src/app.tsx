@@ -6,15 +6,16 @@ import type { ChatAgent } from "./server";
 import {
   MAX_CSV_SIZE_BYTES,
   buildAiReviewProfile,
-  buildDatasetIntent,
   formatBytes,
   parseCsvFile,
   renderPreviewValue,
   validateCsvFile,
   type ColumnSummary,
   type DatasetSummary,
-  type ColumnAssumption,
-  type LlmPreprocessingPlan,
+  type ColumnDecision,
+  type ColumnPreprocessingPlan,
+  type ColumnSelectionPlan,
+  type PreprocessingSuggestionAction,
   type ProfilingNoteCode
 } from "./csv-profile";
 import {
@@ -83,21 +84,18 @@ interface ColumnSort {
 type AiReviewState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "ready"; plan: LlmPreprocessingPlan }
+  | { status: "ready"; plan: ColumnSelectionPlan }
+  | { status: "error"; message: string };
+
+type PreprocessingReviewState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; plan: ColumnPreprocessingPlan }
   | { status: "error"; message: string };
 
 type ColumnPreparationAction = "feature" | "drop" | "review";
 
-type PreprocessingChoice =
-  | "none"
-  | "drop"
-  | "fill_mean"
-  | "fill_median"
-  | "fill_mode"
-  | "one_hot_encode"
-  | "trim_whitespace"
-  | "standardize_missing"
-  | "normalize_boolean";
+type PreprocessingChoice = PreprocessingSuggestionAction;
 
 const COLUMN_FILTERS: Array<{
   key: ColumnFilter;
@@ -844,68 +842,31 @@ function PreviewTable({
 
 function buildReviewChatMessage(
   summary: DatasetSummary,
-  plan: LlmPreprocessingPlan
+  columnPlan: ColumnSelectionPlan,
+  preprocessingPlan: ColumnPreprocessingPlan | null
 ) {
-  const acceptedAssumptions = plan.assumptions.filter(
-    (assumption) => assumption.status === "accepted"
-  );
-  const proposedAssumptions = plan.assumptions.filter(
-    (assumption) => assumption.status === "proposed"
-  );
-
-  return `Use this compact dataset profile and current AI review assumptions as context for our conversation.
+  return `Use this compact dataset profile and current preparation plan as context for our conversation.
 
 Dataset profile:
 ${JSON.stringify(buildAiReviewProfile(summary), null, 2)}
 
-Current AI review:
+Column selection:
 ${JSON.stringify(
   {
-    datasetSummary: plan.datasetSummary,
-    acceptedAssumptions,
-    proposedAssumptions,
-    decisions: plan.decisions,
-    globalWarnings: plan.globalWarnings,
-    nextQuestions: plan.nextQuestions
+    datasetSummary: columnPlan.datasetSummary,
+    targetSuggestion: columnPlan.targetSuggestion,
+    columnDecisions: columnPlan.columnDecisions,
+    globalWarnings: columnPlan.globalWarnings,
+    nextQuestions: columnPlan.nextQuestions
   },
   null,
   2
 )}
 
-Canonical dataset intent:
-${JSON.stringify(buildDatasetIntent(summary, plan.assumptions), null, 2)}
+Preprocessing:
+${JSON.stringify(preprocessingPlan, null, 2)}
 
-When suggesting changes to assumptions, explain briefly and include an optional JSON patch in this shape:
-{
-  "updates": [
-    {
-      "assumptionId": "existing assumption id",
-      "status": "accepted | rejected | proposed",
-      "role": "feature | target | identifier | timestamp | free_text | ignore | unknown",
-      "reason": "short reason"
-    }
-  ]
-}
-Do not assume the patch has been applied until I confirm it.`;
-}
-
-function assumptionRoleLabel(role: ColumnAssumption["role"]) {
-  switch (role) {
-    case "free_text":
-      return "Free text";
-    case "identifier":
-      return "Identifiers";
-    case "timestamp":
-      return "Timestamps";
-    case "target":
-      return "Possible target";
-    case "ignore":
-      return "Ignore";
-    case "feature":
-      return "Features";
-    case "unknown":
-      return "Unknown";
-  }
+When suggesting changes, refer to column names and whether they should be kept, dropped, reviewed, or preprocessed.`;
 }
 
 function ColumnList({ label, columns }: { label: string; columns: string[] }) {
@@ -921,36 +882,29 @@ function ColumnList({ label, columns }: { label: string; columns: string[] }) {
   );
 }
 
-function getAssumptionForColumn(
-  plan: LlmPreprocessingPlan | null,
+function getDecisionForColumn(
+  plan: ColumnSelectionPlan | null,
   columnName: string
 ) {
-  return plan?.assumptions.find(
-    (assumption) => assumption.columnName === columnName
+  return plan?.columnDecisions.find(
+    (decision) => decision.columnName === columnName
   );
 }
 
-function getSuggestedTarget(plan: LlmPreprocessingPlan | null) {
-  return (
-    plan?.assumptions.find((assumption) => assumption.role === "target") ?? null
-  );
+function getSuggestedTarget(plan: ColumnSelectionPlan | null) {
+  return plan?.targetSuggestion ?? null;
 }
 
 function getColumnPreparationAction(
   column: ColumnSummary,
-  assumption: ColumnAssumption | undefined,
+  decision: ColumnDecision | undefined,
   targetColumn: string | null
 ): ColumnPreparationAction {
-  if (column.name === targetColumn) return "review";
-  if (
-    assumption?.role === "identifier" ||
-    assumption?.role === "ignore" ||
-    hasProfilingNote(column, "empty_column") ||
-    hasProfilingNote(column, "constant_column")
-  ) {
+  if (column.name === targetColumn) return "feature";
+  if (decision?.decision === "drop") {
     return "drop";
   }
-  if (assumption?.role === "unknown" || assumption?.role === "free_text") {
+  if (decision?.decision === "review") {
     return "review";
   }
   return "feature";
@@ -987,12 +941,23 @@ function preprocessingChoiceLabel(choice: PreprocessingChoice) {
       return "Standardize missing";
     case "normalize_boolean":
       return "Normalize boolean";
+    case "split_name":
+      return "Split name";
   }
+}
+
+function isLikelyNameColumn(column: ColumnSummary) {
+  const name = column.name.toLowerCase();
+  return (
+    /(name|full_name|fullname|passengername|customer_name)/.test(name) ||
+    column.sampleValues.some((value) =>
+      /^[A-Z][a-z]+(?:\s+[A-Z][a-z.'-]+)+$/.test(value.trim())
+    )
+  );
 }
 
 function getSuggestedPreprocessingChoice(
   column: ColumnSummary,
-  assumption: ColumnAssumption | undefined,
   targetColumn: string | null
 ): { choice: PreprocessingChoice; reason: string } {
   const missingPercent =
@@ -1007,16 +972,19 @@ function getSuggestedPreprocessingChoice(
     };
   }
   if (
-    assumption?.role === "identifier" ||
-    assumption?.role === "ignore" ||
     hasProfilingNote(column, "empty_column") ||
     hasProfilingNote(column, "constant_column")
   ) {
     return {
       choice: "drop",
+      reason: "The column is unlikely to add useful feature signal."
+    };
+  }
+  if (isLikelyNameColumn(column)) {
+    return {
+      choice: "split_name",
       reason:
-        assumption?.evidence[0] ??
-        "The column is unlikely to add useful feature signal."
+        "Sample values look like full names, which can be split into reusable parts."
     };
   }
   if (hasProfilingNote(column, "missing_like_tokens")) {
@@ -1064,7 +1032,32 @@ function getSuggestedPreprocessingChoice(
   }
   return {
     choice: "none",
-    reason: assumption?.recommendedActions[0] ?? "No required cleanup detected."
+    reason: "No required cleanup detected."
+  };
+}
+
+function getPlanPreprocessingSuggestion(
+  plan: ColumnPreprocessingPlan | null,
+  column: ColumnSummary,
+  targetColumn: string | null
+) {
+  const suggestion = plan?.preprocessingSuggestions.find(
+    (item) => item.columnName === column.name
+  );
+  if (suggestion) {
+    return {
+      choice: suggestion.action,
+      reason: suggestion.reason,
+      options: Array.from(
+        new Set([suggestion.action, ...suggestion.alternatives])
+      )
+    };
+  }
+
+  const fallback = getSuggestedPreprocessingChoice(column, targetColumn);
+  return {
+    ...fallback,
+    options: [fallback.choice]
   };
 }
 
@@ -1072,18 +1065,21 @@ function SelectBox({
   value,
   onChange,
   children,
-  ariaLabel
+  ariaLabel,
+  disabled = false
 }: {
   value: string;
   onChange: (value: string) => void;
   children: React.ReactNode;
   ariaLabel: string;
+  disabled?: boolean;
 }) {
   return (
     <select
       value={value}
       aria-label={ariaLabel}
-      className="h-8 rounded-md border border-kumo-line bg-kumo-base px-2 text-sm text-kumo-default outline-none focus:ring-2 focus:ring-kumo-ring"
+      disabled={disabled}
+      className="h-8 rounded-md border border-kumo-line bg-kumo-base px-2 text-sm text-kumo-default outline-none focus:ring-2 focus:ring-kumo-ring disabled:cursor-not-allowed disabled:opacity-60"
       onChange={(event) => onChange(event.target.value)}
     >
       {children}
@@ -1094,25 +1090,32 @@ function SelectBox({
 function PreparationReviewPanel({
   summary,
   reviewState,
+  preprocessingState,
   targetColumn,
   columnActions,
+  finalizedFeatureColumns,
   preprocessingChoices,
   onGenerate,
+  onGeneratePreprocessing,
   onAcceptTarget,
   onTargetChange,
+  onFinishSelection,
   onColumnActionChange,
   onPreprocessingChoiceChange,
-  onApplySuggestedPreprocessing,
   onSendToChat
 }: {
   summary: DatasetSummary;
   reviewState: AiReviewState;
+  preprocessingState: PreprocessingReviewState;
   targetColumn: string | null;
   columnActions: Record<string, ColumnPreparationAction>;
+  finalizedFeatureColumns: string[] | null;
   preprocessingChoices: Record<string, PreprocessingChoice>;
   onGenerate: () => void;
+  onGeneratePreprocessing: () => void;
   onAcceptTarget: (columnName: string) => void;
   onTargetChange: (columnName: string) => void;
+  onFinishSelection: () => void;
   onColumnActionChange: (
     columnName: string,
     action: ColumnPreparationAction
@@ -1121,24 +1124,34 @@ function PreparationReviewPanel({
     columnName: string,
     choice: PreprocessingChoice
   ) => void;
-  onApplySuggestedPreprocessing: () => void;
   onSendToChat: () => void;
 }) {
   const plan = reviewState.status === "ready" ? reviewState.plan : null;
+  const preprocessingPlan =
+    preprocessingState.status === "ready" ? preprocessingState.plan : null;
   const suggestedTarget = getSuggestedTarget(plan);
   const selectedTarget = targetColumn ?? suggestedTarget?.columnName ?? "";
-  const targetEvidence = suggestedTarget?.evidence.join(" ") || "";
+  const targetEvidence = suggestedTarget?.reason || "";
+  const finalizedFeatureSet = new Set(finalizedFeatureColumns ?? []);
+  const isSelectionFinalized = finalizedFeatureColumns !== null;
   const preparedColumns = summary.columns.map((column) => {
-    const assumption = getAssumptionForColumn(plan, column.name);
+    const decision = getDecisionForColumn(plan, column.name);
     const suggestedAction = getColumnPreparationAction(
       column,
-      assumption,
+      decision,
       targetColumn
     );
-    const selectedAction = columnActions[column.name] ?? suggestedAction;
-    const suggestedPreprocessing = getSuggestedPreprocessingChoice(
+    const selectedAction =
+      column.name === targetColumn
+        ? "feature"
+        : isSelectionFinalized
+          ? finalizedFeatureSet.has(column.name)
+            ? "feature"
+            : "drop"
+          : (columnActions[column.name] ?? suggestedAction);
+    const suggestedPreprocessing = getPlanPreprocessingSuggestion(
+      preprocessingPlan,
       column,
-      assumption,
       targetColumn
     );
     const selectedPreprocessing =
@@ -1146,7 +1159,7 @@ function PreparationReviewPanel({
 
     return {
       column,
-      assumption,
+      decision,
       suggestedAction,
       selectedAction,
       suggestedPreprocessing,
@@ -1154,13 +1167,22 @@ function PreparationReviewPanel({
     };
   });
   const featureColumns = preparedColumns.filter(
-    (item) => item.selectedAction === "feature"
+    (item) =>
+      item.column.name !== targetColumn && item.selectedAction === "feature"
   );
   const droppedColumns = preparedColumns.filter(
-    (item) => item.selectedAction === "drop"
+    (item) =>
+      item.column.name !== targetColumn && item.selectedAction === "drop"
+  );
+  const reviewColumns = preparedColumns.filter(
+    (item) =>
+      item.column.name !== targetColumn && item.selectedAction === "review"
   );
   const activePreprocessing = preparedColumns.filter(
-    (item) => item.selectedPreprocessing !== "none"
+    (item) =>
+      item.column.name !== targetColumn &&
+      item.selectedAction === "feature" &&
+      item.selectedPreprocessing !== "none"
   );
 
   return (
@@ -1281,6 +1303,9 @@ function PreparationReviewPanel({
                 </Text>
                 <Text size="xs" variant="secondary">
                   {featureColumns.length} used, {droppedColumns.length} dropped
+                  {reviewColumns.length > 0
+                    ? `, ${reviewColumns.length} to review`
+                    : ""}
                 </Text>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -1303,12 +1328,7 @@ function PreparationReviewPanel({
                 </thead>
                 <tbody className="divide-y divide-kumo-line">
                   {preparedColumns.map(
-                    ({
-                      column,
-                      assumption,
-                      suggestedAction,
-                      selectedAction
-                    }) => (
+                    ({ column, decision, suggestedAction, selectedAction }) => (
                       <tr key={column.name}>
                         <td className="px-3 py-2">
                           <div className="grid gap-1">
@@ -1338,15 +1358,15 @@ function PreparationReviewPanel({
                             >
                               {columnActionLabel(suggestedAction)}
                             </Badge>
-                            {assumption && (
+                            {decision && (
                               <Badge variant="secondary">
-                                {assumptionRoleLabel(assumption.role)}
+                                {decision.confidence}
                               </Badge>
                             )}
                           </div>
                         </td>
                         <td className="max-w-md px-3 py-2 text-kumo-subtle">
-                          {assumption?.evidence[0] ??
+                          {decision?.reason ??
                             column.profilingNotes[0]?.message ??
                             "No strong signal found."}
                         </td>
@@ -1354,6 +1374,10 @@ function PreparationReviewPanel({
                           <SelectBox
                             value={selectedAction}
                             ariaLabel={`Set role for ${column.name}`}
+                            disabled={
+                              isSelectionFinalized ||
+                              column.name === targetColumn
+                            }
                             onChange={(value) =>
                               onColumnActionChange(
                                 column.name,
@@ -1372,6 +1396,29 @@ function PreparationReviewPanel({
                 </tbody>
               </table>
             </div>
+            <div className="flex flex-col gap-2 border-t border-kumo-line p-3 sm:flex-row sm:items-center sm:justify-between">
+              <Text size="xs" variant="secondary">
+                {isSelectionFinalized
+                  ? "Column selection is finished. Dropped columns will be excluded from preprocessing."
+                  : reviewColumns.length > 0
+                    ? "Resolve reviewed columns before finishing the selection."
+                    : "Finish the selection to lock the kept columns for preprocessing."}
+              </Text>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                icon={<CheckCircleIcon size={14} />}
+                disabled={
+                  !targetColumn ||
+                  isSelectionFinalized ||
+                  reviewColumns.length > 0
+                }
+                onClick={onFinishSelection}
+              >
+                Finish selection
+              </Button>
+            </div>
           </div>
 
           <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
@@ -1381,92 +1428,106 @@ function PreparationReviewPanel({
                   Preprocessing proposals
                 </Text>
                 <Text size="xs" variant="secondary">
-                  {activePreprocessing.length} active steps
+                  Finalize kept columns, then ask the model for preprocessing.
                 </Text>
               </div>
               <Button
                 type="button"
-                variant="secondary"
+                variant="primary"
                 size="sm"
                 icon={<MagnifyingGlassIcon size={14} />}
-                onClick={onApplySuggestedPreprocessing}
+                disabled={
+                  !targetColumn ||
+                  !isSelectionFinalized ||
+                  preprocessingState.status === "loading"
+                }
+                onClick={onGeneratePreprocessing}
               >
-                Use suggestions
+                {preprocessingState.status === "loading"
+                  ? "Reviewing"
+                  : "Suggest preprocessing"}
               </Button>
             </div>
-            <div className="overflow-auto">
-              <table className="min-w-full text-left text-sm">
-                <thead className="bg-kumo-base text-kumo-subtle">
-                  <tr>
-                    <th className="px-3 py-2 font-medium">Column</th>
-                    <th className="px-3 py-2 font-medium">Suggested step</th>
-                    <th className="px-3 py-2 font-medium">Reason</th>
-                    <th className="px-3 py-2 font-medium">Decision</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-kumo-line">
-                  {preparedColumns.map(
-                    ({
-                      column,
-                      suggestedPreprocessing,
-                      selectedPreprocessing
-                    }) => (
-                      <tr key={column.name}>
-                        <td className="px-3 py-2 font-medium text-kumo-default">
-                          {column.name}
-                        </td>
-                        <td className="px-3 py-2">
-                          <Badge
-                            variant={
-                              suggestedPreprocessing.choice === "none"
-                                ? "secondary"
-                                : "primary"
-                            }
-                          >
-                            {preprocessingChoiceLabel(
-                              suggestedPreprocessing.choice
-                            )}
-                          </Badge>
-                        </td>
-                        <td className="max-w-md px-3 py-2 text-kumo-subtle">
-                          {suggestedPreprocessing.reason}
-                        </td>
-                        <td className="px-3 py-2">
-                          <SelectBox
-                            value={selectedPreprocessing}
-                            ariaLabel={`Set preprocessing for ${column.name}`}
-                            onChange={(value) =>
-                              onPreprocessingChoiceChange(
-                                column.name,
-                                value as PreprocessingChoice
-                              )
-                            }
-                          >
-                            <option value="none">No step</option>
-                            <option value="drop">Drop column</option>
-                            <option value="fill_mean">Fill mean</option>
-                            <option value="fill_median">Fill median</option>
-                            <option value="fill_mode">Fill mode</option>
-                            <option value="one_hot_encode">
-                              One-hot encode
-                            </option>
-                            <option value="trim_whitespace">
-                              Trim whitespace
-                            </option>
-                            <option value="standardize_missing">
-                              Standardize missing
-                            </option>
-                            <option value="normalize_boolean">
-                              Normalize boolean
-                            </option>
-                          </SelectBox>
-                        </td>
-                      </tr>
-                    )
-                  )}
-                </tbody>
-              </table>
-            </div>
+            {preprocessingState.status === "error" && (
+              <div className="border-b border-kumo-line px-3 py-2">
+                <Text size="sm">{preprocessingState.message}</Text>
+              </div>
+            )}
+            {preprocessingState.status !== "ready" ? (
+              <div className="px-3 py-4">
+                <Text size="sm" variant="secondary">
+                  Preprocessing suggestions will use only the columns kept when
+                  the selection was finished.
+                </Text>
+              </div>
+            ) : (
+              <div className="overflow-auto">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-kumo-base text-kumo-subtle">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">Column</th>
+                      <th className="px-3 py-2 font-medium">Suggested step</th>
+                      <th className="px-3 py-2 font-medium">Reason</th>
+                      <th className="px-3 py-2 font-medium">Decision</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-kumo-line">
+                    {preparedColumns.map(
+                      ({
+                        column,
+                        selectedAction,
+                        suggestedPreprocessing,
+                        selectedPreprocessing
+                      }) =>
+                        selectedAction === "feature" ? (
+                          <tr key={column.name}>
+                            <td className="px-3 py-2 font-medium text-kumo-default">
+                              {column.name}
+                            </td>
+                            <td className="px-3 py-2">
+                              <Badge
+                                variant={
+                                  suggestedPreprocessing.choice === "none"
+                                    ? "secondary"
+                                    : "primary"
+                                }
+                              >
+                                {preprocessingChoiceLabel(
+                                  suggestedPreprocessing.choice
+                                )}
+                              </Badge>
+                            </td>
+                            <td className="max-w-md px-3 py-2 text-kumo-subtle">
+                              {suggestedPreprocessing.reason}
+                            </td>
+                            <td className="px-3 py-2">
+                              <SelectBox
+                                value={selectedPreprocessing}
+                                ariaLabel={`Set preprocessing for ${column.name}`}
+                                onChange={(value) =>
+                                  onPreprocessingChoiceChange(
+                                    column.name,
+                                    value as PreprocessingChoice
+                                  )
+                                }
+                              >
+                                <option value="none">No step</option>
+                                {suggestedPreprocessing.options
+                                  .filter((choice) => choice !== "none")
+                                  .map((choice) => (
+                                    <option key={choice} value={choice}>
+                                      {preprocessingChoiceLabel(choice)}
+                                    </option>
+                                  ))}
+                              </SelectBox>
+                            </td>
+                          </tr>
+                        ) : null
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
 
           <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
@@ -1563,10 +1624,17 @@ function DatasetWorkspace() {
   const [aiReviewState, setAiReviewState] = useState<AiReviewState>({
     status: "idle"
   });
+  const [preprocessingReviewState, setPreprocessingReviewState] =
+    useState<PreprocessingReviewState>({
+      status: "idle"
+    });
   const [targetColumn, setTargetColumn] = useState<string | null>(null);
   const [columnActions, setColumnActions] = useState<
     Record<string, ColumnPreparationAction>
   >({});
+  const [finalizedFeatureColumns, setFinalizedFeatureColumns] = useState<
+    string[] | null
+  >(null);
   const [preprocessingChoices, setPreprocessingChoices] = useState<
     Record<string, PreprocessingChoice>
   >({});
@@ -1646,8 +1714,10 @@ function DatasetWorkspace() {
   const resetWorkspace = useCallback(() => {
     setUploadState({ status: "idle" });
     setAiReviewState({ status: "idle" });
+    setPreprocessingReviewState({ status: "idle" });
     setTargetColumn(null);
     setColumnActions({});
+    setFinalizedFeatureColumns(null);
     setPreprocessingChoices({});
     setColumnFilter("all");
     setColumnSort({ key: "notesCount", direction: "desc" });
@@ -1658,8 +1728,10 @@ function DatasetWorkspace() {
     if (!currentSummary) return;
 
     setAiReviewState({ status: "loading" });
+    setPreprocessingReviewState({ status: "idle" });
+    setFinalizedFeatureColumns(null);
     try {
-      const response = await fetch("/api/ai-review", {
+      const response = await fetch("/api/column-selection", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -1671,29 +1743,19 @@ function DatasetWorkspace() {
       if (!response.ok) {
         throw new Error(
           (data as { error?: string } | null)?.error ||
-            "The AI review could not be generated."
+            "The column selection review could not be generated."
         );
       }
 
-      const reviewPlan = data as LlmPreprocessingPlan;
+      const reviewPlan = data as ColumnSelectionPlan;
       const suggestedTarget =
         getSuggestedTarget(reviewPlan)?.columnName ?? null;
       const nextColumnActions = Object.fromEntries(
         currentSummary.columns.map((column) => {
-          const assumption = getAssumptionForColumn(reviewPlan, column.name);
+          const decision = getDecisionForColumn(reviewPlan, column.name);
           return [
             column.name,
-            getColumnPreparationAction(column, assumption, suggestedTarget)
-          ];
-        })
-      );
-      const nextPreprocessingChoices = Object.fromEntries(
-        currentSummary.columns.map((column) => {
-          const assumption = getAssumptionForColumn(reviewPlan, column.name);
-          return [
-            column.name,
-            getSuggestedPreprocessingChoice(column, assumption, suggestedTarget)
-              .choice
+            getColumnPreparationAction(column, decision, suggestedTarget)
           ];
         })
       );
@@ -1704,10 +1766,11 @@ function DatasetWorkspace() {
       });
       setTargetColumn(suggestedTarget);
       setColumnActions(nextColumnActions);
-      setPreprocessingChoices(nextPreprocessingChoices);
+      setFinalizedFeatureColumns(null);
+      setPreprocessingChoices({});
       toasts.add({
-        title: "AI review generated",
-        description: "Confirm the target and preprocessing proposals."
+        title: "Column suggestions generated",
+        description: "Confirm the target and columns to keep."
       });
     } catch (error) {
       setAiReviewState({
@@ -1715,7 +1778,7 @@ function DatasetWorkspace() {
         message:
           error instanceof Error
             ? error.message
-            : "The AI review could not be generated."
+            : "The column selection review could not be generated."
       });
     }
   }, [currentSummary, toasts]);
@@ -1726,7 +1789,13 @@ function DatasetWorkspace() {
     window.dispatchEvent(
       new CustomEvent("automated-fe:agent-chat-message", {
         detail: {
-          text: buildReviewChatMessage(currentSummary, aiReviewState.plan)
+          text: buildReviewChatMessage(
+            currentSummary,
+            aiReviewState.plan,
+            preprocessingReviewState.status === "ready"
+              ? preprocessingReviewState.plan
+              : null
+          )
         }
       })
     );
@@ -1734,13 +1803,16 @@ function DatasetWorkspace() {
       title: "Review sent to chat",
       description: "The agent sidebar now has the current review context."
     });
-  }, [aiReviewState, currentSummary, toasts]);
+  }, [aiReviewState, currentSummary, preprocessingReviewState, toasts]);
 
   const acceptTarget = useCallback((columnName: string) => {
+    setPreprocessingReviewState({ status: "idle" });
+    setFinalizedFeatureColumns(null);
+    setPreprocessingChoices({});
     setTargetColumn(columnName);
     setColumnActions((current) => ({
       ...current,
-      [columnName]: "review"
+      [columnName]: "feature"
     }));
     setPreprocessingChoices((current) => ({
       ...current,
@@ -1749,11 +1821,14 @@ function DatasetWorkspace() {
   }, []);
 
   const changeTarget = useCallback((columnName: string) => {
+    setPreprocessingReviewState({ status: "idle" });
+    setFinalizedFeatureColumns(null);
+    setPreprocessingChoices({});
     setTargetColumn(columnName || null);
     if (!columnName) return;
     setColumnActions((current) => ({
       ...current,
-      [columnName]: "review"
+      [columnName]: "feature"
     }));
     setPreprocessingChoices((current) => ({
       ...current,
@@ -1767,15 +1842,38 @@ function DatasetWorkspace() {
         ...current,
         [columnName]: action
       }));
+      setPreprocessingReviewState({ status: "idle" });
+      setFinalizedFeatureColumns(null);
       if (action === "drop") {
         setPreprocessingChoices((current) => ({
           ...current,
-          [columnName]: "drop"
+          [columnName]: "none"
         }));
       }
     },
     []
   );
+
+  const finishColumnSelection = useCallback(() => {
+    if (!currentSummary || !targetColumn) return;
+
+    const keptColumns = currentSummary.columns
+      .map((column) => column.name)
+      .filter(
+        (columnName) =>
+          columnName !== targetColumn && columnActions[columnName] === "feature"
+      );
+
+    setFinalizedFeatureColumns(keptColumns);
+    setPreprocessingReviewState({ status: "idle" });
+    setPreprocessingChoices({});
+    toasts.add({
+      title: "Column selection finished",
+      description: `${keptColumns.length.toLocaleString()} feature column${
+        keptColumns.length === 1 ? "" : "s"
+      } kept for preprocessing.`
+    });
+  }, [columnActions, currentSummary, targetColumn, toasts]);
 
   const changePreprocessingChoice = useCallback(
     (columnName: string, choice: PreprocessingChoice) => {
@@ -1793,23 +1891,71 @@ function DatasetWorkspace() {
     []
   );
 
-  const applySuggestedPreprocessing = useCallback(() => {
-    if (!currentSummary || aiReviewState.status !== "ready") return;
-    const plan = aiReviewState.plan;
+  const generatePreprocessingReview = useCallback(async () => {
+    if (!currentSummary || !targetColumn) return;
 
-    setPreprocessingChoices(
-      Object.fromEntries(
-        currentSummary.columns.map((column) => {
-          const assumption = getAssumptionForColumn(plan, column.name);
-          return [
-            column.name,
-            getSuggestedPreprocessingChoice(column, assumption, targetColumn)
-              .choice
-          ];
+    const keptColumns =
+      finalizedFeatureColumns ??
+      currentSummary.columns
+        .map((column) => column.name)
+        .filter(
+          (columnName) =>
+            columnName !== targetColumn &&
+            columnActions[columnName] === "feature"
+        );
+
+    setPreprocessingReviewState({ status: "loading" });
+    try {
+      const response = await fetch("/api/preprocessing-review", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          profile: buildAiReviewProfile(currentSummary),
+          targetColumn,
+          keptColumns
         })
-      )
-    );
-  }, [aiReviewState, currentSummary, targetColumn]);
+      });
+      const data = await response.json().catch(() => null);
+
+      if (!response.ok) {
+        throw new Error(
+          (data as { error?: string } | null)?.error ||
+            "The preprocessing review could not be generated."
+        );
+      }
+
+      const plan = data as ColumnPreprocessingPlan;
+      setPreprocessingReviewState({ status: "ready", plan });
+      setPreprocessingChoices(
+        Object.fromEntries(
+          keptColumns.map((columnName) => {
+            const suggestion = plan.preprocessingSuggestions.find(
+              (item) => item.columnName === columnName
+            );
+            return [columnName, suggestion?.action ?? "none"];
+          })
+        )
+      );
+      toasts.add({
+        title: "Preprocessing suggestions generated",
+        description: "Review the proposed transformations for kept columns."
+      });
+    } catch (error) {
+      setPreprocessingReviewState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The preprocessing review could not be generated."
+      });
+    }
+  }, [
+    columnActions,
+    currentSummary,
+    finalizedFeatureColumns,
+    targetColumn,
+    toasts
+  ]);
 
   const handleCsvFile = useCallback(
     async (file: File) => {
@@ -1819,8 +1965,10 @@ function DatasetWorkspace() {
         );
         if (!replace) return;
         setAiReviewState({ status: "idle" });
+        setPreprocessingReviewState({ status: "idle" });
         setTargetColumn(null);
         setColumnActions({});
+        setFinalizedFeatureColumns(null);
         setPreprocessingChoices({});
       }
 
@@ -1836,8 +1984,10 @@ function DatasetWorkspace() {
         const summary = await parseCsvFile(file);
         setUploadState({ status: "ready", summary });
         setAiReviewState({ status: "idle" });
+        setPreprocessingReviewState({ status: "idle" });
         setTargetColumn(null);
         setColumnActions({});
+        setFinalizedFeatureColumns(null);
         setPreprocessingChoices({});
         toasts.add({
           title: "CSV parsed",
@@ -2031,15 +2181,18 @@ function DatasetWorkspace() {
             <PreparationReviewPanel
               summary={currentSummary}
               reviewState={aiReviewState}
+              preprocessingState={preprocessingReviewState}
               targetColumn={targetColumn}
               columnActions={columnActions}
+              finalizedFeatureColumns={finalizedFeatureColumns}
               preprocessingChoices={preprocessingChoices}
               onGenerate={() => void generateAiReview()}
+              onGeneratePreprocessing={() => void generatePreprocessingReview()}
               onAcceptTarget={acceptTarget}
               onTargetChange={changeTarget}
+              onFinishSelection={finishColumnSelection}
               onColumnActionChange={changeColumnAction}
               onPreprocessingChoiceChange={changePreprocessingChoice}
-              onApplySuggestedPreprocessing={applySuggestedPreprocessing}
               onSendToChat={sendAiReviewToChat}
             />
 

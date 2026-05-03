@@ -49,9 +49,60 @@ const llmColumnAssumptionSchema = columnAssumptionSchema.omit({
   status: true
 });
 
+const preprocessingSuggestionActionSchema = z.enum([
+  "none",
+  "drop",
+  "fill_mean",
+  "fill_median",
+  "fill_mode",
+  "one_hot_encode",
+  "trim_whitespace",
+  "standardize_missing",
+  "normalize_boolean",
+  "split_name"
+]);
+
+const preprocessingSuggestionSchema = z.object({
+  columnName: z.string(),
+  action: preprocessingSuggestionActionSchema,
+  reason: z.string(),
+  alternatives: z.array(preprocessingSuggestionActionSchema).max(5)
+});
+
+const columnSelectionDecisionSchema = z.enum(["keep", "drop", "review"]);
+
+const targetSuggestionSchema = z.object({
+  columnName: z.string(),
+  reason: z.string(),
+  confidence: z.enum(["low", "medium", "high"])
+});
+
+const columnDecisionSchema = z.object({
+  columnName: z.string(),
+  decision: columnSelectionDecisionSchema,
+  reason: z.string(),
+  confidence: z.enum(["low", "medium", "high"]),
+  alternatives: z.array(columnSelectionDecisionSchema).max(3)
+});
+
+const columnSelectionPlanSchema = z.object({
+  datasetSummary: z.string(),
+  targetSuggestion: targetSuggestionSchema.optional(),
+  columnDecisions: z.array(columnDecisionSchema),
+  globalWarnings: z.array(z.string()).max(8),
+  nextQuestions: z.array(z.string()).max(5)
+});
+
+const preprocessingRequestSchema = z.object({
+  profile: z.lazy(() => reviewProfileSchema),
+  targetColumn: z.string(),
+  keptColumns: z.array(z.string())
+});
+
 const preprocessingPlanSchema = z.object({
   datasetSummary: z.string(),
   assumptions: z.array(columnAssumptionSchema),
+  preprocessingSuggestions: z.array(preprocessingSuggestionSchema),
   decisions: z.array(
     z.object({
       id: z.string(),
@@ -80,6 +131,9 @@ const llmReviewSchema = z.object({
   assumptions: z.array(llmColumnAssumptionSchema),
   globalWarnings: z.array(z.string()).max(8),
   nextQuestions: z.array(z.string()).max(5)
+});
+const llmPreprocessingReviewSchema = z.object({
+  preprocessingSuggestions: z.array(preprocessingSuggestionSchema)
 });
 
 const reviewProfileSchema = z.object({
@@ -132,6 +186,10 @@ const reviewProfileSchema = z.object({
 type ReviewProfile = z.infer<typeof reviewProfileSchema>;
 type PreprocessingPlan = z.infer<typeof preprocessingPlanSchema>;
 type LlmReview = z.infer<typeof llmReviewSchema>;
+type LlmPreprocessingReview = z.infer<typeof llmPreprocessingReviewSchema>;
+type PreprocessingAction = z.infer<typeof preprocessingSuggestionActionSchema>;
+type ColumnSelectionPlan = z.infer<typeof columnSelectionPlanSchema>;
+type ColumnSelectionDecision = z.infer<typeof columnSelectionDecisionSchema>;
 
 function extractJsonObject(text: string) {
   const fencedMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
@@ -238,6 +296,147 @@ function chooseFallbackTarget(profile: ReviewProfile) {
   return lastUsableColumn?.name;
 }
 
+function plausibleColumnDecisions(
+  column: ReviewProfile["columns"][number],
+  targetColumn?: string
+): ColumnSelectionDecision[] {
+  const decisions: ColumnSelectionDecision[] = ["keep", "drop", "review"];
+  if (column.name === targetColumn) return ["review", "keep"];
+  return decisions;
+}
+
+function defaultColumnDecision(
+  column: ReviewProfile["columns"][number],
+  targetColumn?: string
+): ColumnSelectionPlan["columnDecisions"][number] {
+  const role = roleForProfileColumn(column);
+  const isTarget = column.name === targetColumn;
+  let decision: ColumnSelectionDecision = "keep";
+  let reason = "Column may provide useful model signal.";
+  let confidence: ColumnSelectionPlan["columnDecisions"][number]["confidence"] =
+    "medium";
+
+  if (isTarget) {
+    decision = "review";
+    reason =
+      "Selected as the target candidate, so it should not be used as a feature.";
+    confidence = "high";
+  } else if (
+    role === "identifier" ||
+    role === "ignore" ||
+    column.profilingNotes.some(
+      (note) => note.code === "empty_column" || note.code === "constant_column"
+    )
+  ) {
+    decision = "drop";
+    reason =
+      role === "identifier"
+        ? "Likely identifier; including it may leak row identity."
+        : "Column appears empty, constant, or otherwise low value.";
+    confidence = "high";
+  } else if (role === "free_text" || role === "unknown") {
+    decision = "review";
+    reason = "Column may need user judgment before keeping or dropping.";
+  }
+
+  return {
+    columnName: column.name,
+    decision,
+    reason,
+    confidence,
+    alternatives: plausibleColumnDecisions(column, targetColumn).filter(
+      (candidate) => candidate !== decision
+    )
+  };
+}
+
+function buildFallbackColumnSelectionPlan(profile: ReviewProfile) {
+  const targetColumn = chooseFallbackTarget(profile);
+  return {
+    datasetSummary: `${profile.fileName} has ${profile.parsedRowCount.toLocaleString()} rows and ${profile.columnCount} columns.`,
+    targetSuggestion: targetColumn
+      ? {
+          columnName: targetColumn,
+          reason:
+            "Selected from profile statistics as the most likely target candidate.",
+          confidence: "medium" as const
+        }
+      : undefined,
+    columnDecisions: profile.columns.map((column) =>
+      defaultColumnDecision(column, targetColumn)
+    ),
+    globalWarnings: [
+      "AI column selection response could not be parsed. Showing a deterministic fallback from profile statistics.",
+      ...profile.warnings
+    ].slice(0, 8),
+    nextQuestions: ["Confirm the target column before preprocessing."]
+  } satisfies ColumnSelectionPlan;
+}
+
+function normalizeColumnSelectionPlan(
+  profile: ReviewProfile,
+  plan: ColumnSelectionPlan
+) {
+  const columnsByName = new Map(
+    profile.columns.map((column) => [column.name, column])
+  );
+  const targetColumn = columnsByName.has(
+    plan.targetSuggestion?.columnName ?? ""
+  )
+    ? plan.targetSuggestion?.columnName
+    : chooseFallbackTarget(profile);
+  const seen = new Set<string>();
+  const columnDecisions: ColumnSelectionPlan["columnDecisions"] = [];
+
+  for (const decision of plan.columnDecisions) {
+    const column = columnsByName.get(decision.columnName);
+    if (!column || seen.has(decision.columnName)) continue;
+
+    const plausible = plausibleColumnDecisions(column, targetColumn);
+    const fallback = defaultColumnDecision(column, targetColumn);
+    const selected = plausible.includes(decision.decision)
+      ? decision.decision
+      : fallback.decision;
+
+    seen.add(decision.columnName);
+    columnDecisions.push({
+      ...decision,
+      decision: selected,
+      reason: decision.reason || fallback.reason,
+      alternatives: Array.from(
+        new Set([
+          ...decision.alternatives.filter((item) => plausible.includes(item)),
+          ...fallback.alternatives
+        ])
+      ).filter((item) => item !== selected)
+    });
+  }
+
+  for (const column of profile.columns) {
+    if (!seen.has(column.name)) {
+      columnDecisions.push(defaultColumnDecision(column, targetColumn));
+    }
+  }
+
+  return {
+    ...plan,
+    targetSuggestion: targetColumn
+      ? {
+          columnName: targetColumn,
+          reason:
+            plan.targetSuggestion?.columnName === targetColumn
+              ? plan.targetSuggestion.reason
+              : "Selected from profile statistics as the most likely target candidate.",
+          confidence:
+            plan.targetSuggestion?.columnName === targetColumn
+              ? plan.targetSuggestion.confidence
+              : ("medium" as const)
+        }
+      : undefined,
+    columnDecisions
+  } satisfies ColumnSelectionPlan;
+}
+
 function buildDecisionTrace(
   profile: ReviewProfile,
   assumptions: PreprocessingPlan["assumptions"]
@@ -281,7 +480,10 @@ function buildDecisionTrace(
 
 function buildPreprocessingPlan(
   profile: ReviewProfile,
-  review: LlmReview & { assumptions: PreprocessingPlan["assumptions"] }
+  review: LlmReview & {
+    assumptions: PreprocessingPlan["assumptions"];
+    preprocessingSuggestions: PreprocessingPlan["preprocessingSuggestions"];
+  }
 ): PreprocessingPlan {
   return {
     ...review,
@@ -316,10 +518,142 @@ function buildLocalAssumption(
   };
 }
 
+function uniqueActions(actions: PreprocessingAction[]) {
+  return Array.from(new Set(actions));
+}
+
+function isLikelyNameColumn(column: ReviewProfile["columns"][number]) {
+  const name = column.name.toLowerCase();
+  return (
+    /(name|full_name|fullname|passengername|customer_name)/.test(name) ||
+    column.sampleValues.some((value) => {
+      const trimmed = value.trim();
+      return /^[A-Z][a-z]+(?:\s+[A-Z][a-z.'-]+)+$/.test(trimmed);
+    })
+  );
+}
+
+function plausiblePreprocessingActions(
+  column: ReviewProfile["columns"][number],
+  assumption: PreprocessingPlan["assumptions"][number]
+) {
+  const actions: PreprocessingAction[] = ["none"];
+
+  if (assumption.role === "identifier" || assumption.role === "ignore") {
+    actions.push("drop");
+  }
+  if (
+    column.profilingNotes.some(
+      (note) => note.code === "empty_column" || note.code === "constant_column"
+    )
+  ) {
+    actions.push("drop");
+  }
+  if (column.profilingNotes.some((note) => note.code === "missing_like_tokens"))
+    actions.push("standardize_missing");
+  if (
+    column.profilingNotes.some(
+      (note) => note.code === "leading_trailing_whitespace"
+    )
+  ) {
+    actions.push("trim_whitespace");
+  }
+  if (column.inferredType === "boolean") actions.push("normalize_boolean");
+  if (column.missingCount > 0 && column.inferredType === "number") {
+    actions.push("fill_mean", "fill_median");
+  }
+  if (
+    column.missingCount > 0 &&
+    (column.inferredType === "string" || column.inferredType === "boolean")
+  ) {
+    actions.push("fill_mode");
+  }
+  if (
+    column.inferredType === "string" &&
+    column.uniqueCount > 1 &&
+    column.uniqueRatio <= 0.2
+  ) {
+    actions.push("one_hot_encode");
+  }
+  if (isLikelyNameColumn(column)) actions.push("split_name", "drop");
+
+  return uniqueActions(actions);
+}
+
+function defaultPreprocessingSuggestion(
+  column: ReviewProfile["columns"][number],
+  assumption: PreprocessingPlan["assumptions"][number]
+): PreprocessingPlan["preprocessingSuggestions"][number] {
+  const actions = plausiblePreprocessingActions(column, assumption);
+  let action = actions[0] ?? "none";
+  let reason = "No specific preprocessing needed from the current profile.";
+
+  if (assumption.role === "identifier" || assumption.role === "ignore") {
+    action = "drop";
+    reason = "The column is not expected to be useful as a model feature.";
+  } else if (isLikelyNameColumn(column)) {
+    action = "split_name";
+    reason =
+      "Sample values look like full names, which can be split into reusable parts.";
+  } else if (
+    column.profilingNotes.some((note) => note.code === "empty_column")
+  ) {
+    action = "drop";
+    reason = "The column has no non-empty sampled values.";
+  } else if (
+    column.profilingNotes.some((note) => note.code === "constant_column")
+  ) {
+    action = "drop";
+    reason = "The column is constant in the sampled rows.";
+  } else if (
+    column.profilingNotes.some((note) => note.code === "missing_like_tokens")
+  ) {
+    action = "standardize_missing";
+    reason = "The column contains tokens that commonly represent missingness.";
+  } else if (
+    column.profilingNotes.some(
+      (note) => note.code === "leading_trailing_whitespace"
+    )
+  ) {
+    action = "trim_whitespace";
+    reason = "Sample values include leading or trailing whitespace.";
+  } else if (column.inferredType === "boolean") {
+    action = "normalize_boolean";
+    reason = "Boolean-like values should use one consistent representation.";
+  } else if (column.missingCount > 0 && column.inferredType === "number") {
+    action = column.missingPercent >= 20 ? "fill_median" : "fill_mean";
+    reason =
+      column.missingPercent >= 20
+        ? "Median imputation is robust for numeric columns with material missingness."
+        : "Mean imputation is a simple baseline for low numeric missingness.";
+  } else if (column.missingCount > 0 && column.inferredType === "string") {
+    action = "fill_mode";
+    reason = "Categorical missing values can use the most frequent value.";
+  } else if (
+    column.inferredType === "string" &&
+    column.uniqueCount > 1 &&
+    column.uniqueRatio <= 0.2
+  ) {
+    action = "one_hot_encode";
+    reason = "Low-cardinality categorical values are suitable for encoding.";
+  }
+
+  return {
+    columnName: column.name,
+    action,
+    reason,
+    alternatives: actions.filter((candidate) => candidate !== action)
+  };
+}
+
 function normalizeLlmReview(
   profile: ReviewProfile,
-  review: LlmReview
-): LlmReview & { assumptions: PreprocessingPlan["assumptions"] } {
+  review: LlmReview,
+  preprocessingReview: LlmPreprocessingReview
+): LlmReview & {
+  assumptions: PreprocessingPlan["assumptions"];
+  preprocessingSuggestions: PreprocessingPlan["preprocessingSuggestions"];
+} {
   const columnsByName = new Map(
     profile.columns.map((column) => [column.name, column])
   );
@@ -342,9 +676,64 @@ function normalizeLlmReview(
     if (!seen.has(column.name)) assumptions.push(buildLocalAssumption(column));
   }
 
+  const assumptionsByColumn = new Map(
+    assumptions.map((assumption) => [assumption.columnName, assumption])
+  );
+  const plausibleByColumn = new Map(
+    profile.columns.map((column) => [
+      column.name,
+      plausiblePreprocessingActions(
+        column,
+        assumptionsByColumn.get(column.name) ?? buildLocalAssumption(column)
+      )
+    ])
+  );
+  const suggestionSeen = new Set<string>();
+  const preprocessingSuggestions: PreprocessingPlan["preprocessingSuggestions"] =
+    [];
+
+  for (const suggestion of preprocessingReview.preprocessingSuggestions) {
+    if (suggestionSeen.has(suggestion.columnName)) continue;
+    const column = columnsByName.get(suggestion.columnName);
+    if (!column) continue;
+
+    const assumption =
+      assumptionsByColumn.get(column.name) ?? buildLocalAssumption(column);
+    const plausible = plausibleByColumn.get(column.name) ?? ["none"];
+    const fallback = defaultPreprocessingSuggestion(column, assumption);
+    const action = plausible.includes(suggestion.action)
+      ? suggestion.action
+      : fallback.action;
+    const alternatives = uniqueActions([
+      action,
+      ...suggestion.alternatives.filter((candidate) =>
+        plausible.includes(candidate)
+      ),
+      ...fallback.alternatives
+    ]).filter((candidate) => candidate !== action);
+
+    suggestionSeen.add(suggestion.columnName);
+    preprocessingSuggestions.push({
+      columnName: suggestion.columnName,
+      action,
+      reason: suggestion.reason || fallback.reason,
+      alternatives
+    });
+  }
+
+  for (const column of profile.columns) {
+    if (suggestionSeen.has(column.name)) continue;
+    const assumption =
+      assumptionsByColumn.get(column.name) ?? buildLocalAssumption(column);
+    preprocessingSuggestions.push(
+      defaultPreprocessingSuggestion(column, assumption)
+    );
+  }
+
   return {
     ...review,
-    assumptions
+    assumptions,
+    preprocessingSuggestions
   };
 }
 
@@ -370,6 +759,12 @@ function buildFallbackPreprocessingPlan(profile: ReviewProfile) {
   return buildPreprocessingPlan(profile, {
     datasetSummary: `${profile.fileName} has ${profile.parsedRowCount.toLocaleString()} rows and ${profile.columnCount} columns.`,
     assumptions,
+    preprocessingSuggestions: profile.columns.map((column) => {
+      const assumption =
+        assumptions.find((item) => item.columnName === column.name) ??
+        buildLocalAssumption(column);
+      return defaultPreprocessingSuggestion(column, assumption);
+    }),
     globalWarnings: [
       "AI review response could not be parsed. Showing a local fallback review from deterministic profile statistics.",
       ...profile.warnings
@@ -393,6 +788,72 @@ function parseLlmReviewText(text: string) {
   try {
     const parsed = getJsonPayload(JSON.parse(jsonText));
     const validated = llmReviewSchema.safeParse(parsed);
+
+    if (!validated.success) {
+      return {
+        success: false as const,
+        error: z.prettifyError(validated.error)
+      };
+    }
+
+    return {
+      success: true as const,
+      review: validated.data
+    };
+  } catch (error) {
+    return {
+      success: false as const,
+      error:
+        error instanceof Error ? error.message : "The JSON could not be parsed."
+    };
+  }
+}
+
+function parseColumnSelectionText(text: string) {
+  const jsonText = extractJsonObject(text);
+  if (!jsonText) {
+    return {
+      success: false as const,
+      error: "The model did not return a JSON object."
+    };
+  }
+
+  try {
+    const parsed = getJsonPayload(JSON.parse(jsonText));
+    const validated = columnSelectionPlanSchema.safeParse(parsed);
+
+    if (!validated.success) {
+      return {
+        success: false as const,
+        error: z.prettifyError(validated.error)
+      };
+    }
+
+    return {
+      success: true as const,
+      plan: validated.data
+    };
+  } catch (error) {
+    return {
+      success: false as const,
+      error:
+        error instanceof Error ? error.message : "The JSON could not be parsed."
+    };
+  }
+}
+
+function parseLlmPreprocessingText(text: string) {
+  const jsonText = extractJsonObject(text);
+  if (!jsonText) {
+    return {
+      success: false as const,
+      error: "The model did not return a JSON object."
+    };
+  }
+
+  try {
+    const parsed = getJsonPayload(JSON.parse(jsonText));
+    const validated = llmPreprocessingReviewSchema.safeParse(parsed);
 
     if (!validated.success) {
       return {
@@ -447,6 +908,15 @@ Example response:
       "evidence": ["The column name contains id.", "The unique ratio is 1.00."],
       "risks": ["Using this as a feature may leak row identity."],
       "recommendedActions": ["Exclude from model features unless it encodes useful grouping."]
+    },
+    {
+      "columnName": "full_name",
+      "role": "free_text",
+      "semanticType": "text",
+      "confidence": "medium",
+      "evidence": ["Sample values look like person names."],
+      "risks": ["Raw names can create high-cardinality sparse features."],
+      "recommendedActions": ["Split into useful parts or drop if identity leakage is a concern."]
     }
   ],
   "globalWarnings": [],
@@ -462,6 +932,127 @@ Rules:
 
 Input profile:
 ${JSON.stringify(profile)}`;
+}
+
+function buildColumnSelectionPrompt(profile: ReviewProfile) {
+  return `Return JSON only. Do not use Markdown. Do not include prose before or after the JSON.
+
+Choose the target column and decide which columns to keep before preprocessing. Do not suggest preprocessing steps.
+
+Use this exact JSON shape:
+{
+  "datasetSummary": "short plain English summary",
+  "targetSuggestion": {
+    "columnName": "exact column name from input",
+    "reason": "why this is likely the target",
+    "confidence": "low | medium | high"
+  },
+  "columnDecisions": [
+    {
+      "columnName": "exact column name from input",
+      "decision": "keep | drop | review",
+      "reason": "why to keep, drop, or review",
+      "confidence": "low | medium | high",
+      "alternatives": ["other plausible decisions"]
+    }
+  ],
+  "globalWarnings": ["dataset-level warning, or empty array"],
+  "nextQuestions": ["question for the user, or empty array"]
+}
+
+Rules:
+- Include one columnDecisions entry for every input column.
+- Use every columnName exactly as provided in the input.
+- The target column decision should be "review", not "keep".
+- Drop row identifiers, empty columns, constant columns, and clearly irrelevant leakage columns.
+- Use review for text columns that may be useful only after feature extraction, such as names or tickets.
+- Do not suggest fill, encode, split, normalize, or any preprocessing action in this call.
+
+Input profile:
+${JSON.stringify(profile)}`;
+}
+
+function buildPreprocessingPrompt(profile: ReviewProfile, review: LlmReview) {
+  return `Return JSON only. Do not use Markdown. Do not include prose before or after the JSON.
+
+Use this exact JSON shape:
+{
+  "preprocessingSuggestions": [
+    {
+      "columnName": "exact column name from input",
+      "action": "none | drop | fill_mean | fill_median | fill_mode | one_hot_encode | trim_whitespace | standardize_missing | normalize_boolean | split_name",
+      "reason": "why this step fits this column",
+      "alternatives": ["other plausible actions only"]
+    }
+  ]
+}
+
+Rules:
+- Include one preprocessingSuggestions entry for every input column.
+- Only suggest plausible preprocessing actions for the column type and samples.
+- Do not suggest fill_mean or fill_median for boolean or string columns.
+- Do not suggest fill_mode for numeric columns.
+- Use split_name when the column name or sample values look like person names.
+- Use drop for identifiers, empty columns, constant columns, or clearly irrelevant high-cardinality text.
+- Keep target columns as "none".
+
+Column assumptions:
+${JSON.stringify(review.assumptions)}
+
+Input profile:
+${JSON.stringify(profile)}`;
+}
+
+function buildColumnPreprocessingPrompt({
+  profile,
+  targetColumn,
+  keptColumns
+}: z.infer<typeof preprocessingRequestSchema>) {
+  const kept = new Set(keptColumns);
+  const scopedProfile = {
+    ...profile,
+    columns: profile.columns.filter(
+      (column) => column.name === targetColumn || kept.has(column.name)
+    ),
+    previewRows: profile.previewRows.map((row) =>
+      Object.fromEntries(
+        Object.entries(row).filter(
+          ([columnName]) => columnName === targetColumn || kept.has(columnName)
+        )
+      )
+    )
+  };
+
+  return `Return JSON only. Do not use Markdown. Do not include prose before or after the JSON.
+
+Suggest preprocessing only for kept feature columns. The target column is ${JSON.stringify(targetColumn)} and must not receive a preprocessing step.
+
+Use this exact JSON shape:
+{
+  "preprocessingSuggestions": [
+    {
+      "columnName": "exact kept column name from input",
+      "action": "none | drop | fill_mean | fill_median | fill_mode | one_hot_encode | trim_whitespace | standardize_missing | normalize_boolean | split_name",
+      "reason": "why this step fits this column",
+      "alternatives": ["other plausible actions only"]
+    }
+  ]
+}
+
+Rules:
+- Include one preprocessingSuggestions entry for every kept feature column.
+- Do not include dropped columns.
+- Do not include the target column.
+- Only suggest plausible preprocessing actions for the column type and samples.
+- Do not suggest fill_mean or fill_median for boolean or string columns.
+- Do not suggest fill_mode for numeric columns.
+- Use split_name when the column name or sample values look like person names.
+
+Kept columns:
+${JSON.stringify(keptColumns)}
+
+Scoped input profile:
+${JSON.stringify(scopedProfile)}`;
 }
 
 function inlineDataUrls(messages: ModelMessage[]): ModelMessage[] {
@@ -526,12 +1117,184 @@ async function handleAiReview(request: Request, env: Env) {
     return Response.json(buildFallbackPreprocessingPlan(profile));
   }
 
+  const preprocessingResult = await generateText({
+    model: workersai(model),
+    system:
+      "You suggest CSV preprocessing steps. You output one JSON object only.",
+    prompt: buildPreprocessingPrompt(profile, parsedReview.review)
+  });
+  const parsedPreprocessing = parseLlmPreprocessingText(
+    preprocessingResult.text
+  );
+
+  if (!parsedPreprocessing.success) {
+    console.warn("AI preprocessing response could not be parsed", {
+      error: parsedPreprocessing.error,
+      generatedText: preprocessingResult.text.slice(0, 500)
+    });
+  }
+
   return Response.json(
     buildPreprocessingPlan(
       profile,
-      normalizeLlmReview(profile, parsedReview.review)
+      normalizeLlmReview(
+        profile,
+        parsedReview.review,
+        parsedPreprocessing.success
+          ? parsedPreprocessing.review
+          : { preprocessingSuggestions: [] }
+      )
     )
   );
+}
+
+async function handleColumnSelection(request: Request, env: Env) {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const parsedProfile = reviewProfileSchema.safeParse(
+    (body as { profile?: unknown } | null)?.profile
+  );
+
+  if (!parsedProfile.success) {
+    return Response.json(
+      { error: "Request must include a valid compact dataset profile." },
+      { status: 400 }
+    );
+  }
+
+  const workersai = createWorkersAI({ binding: env.AI });
+  const model = env.AI_MODEL || DEFAULT_AI_MODEL;
+  const profile = parsedProfile.data;
+  const result = await generateText({
+    model: workersai(model),
+    system:
+      "You decide which CSV columns should be kept before preprocessing. You output JSON only.",
+    prompt: buildColumnSelectionPrompt(profile)
+  });
+  const parsedPlan = parseColumnSelectionText(result.text);
+
+  if (!parsedPlan.success) {
+    console.warn("AI column selection response could not be parsed", {
+      error: parsedPlan.error,
+      generatedText: result.text.slice(0, 500)
+    });
+
+    return Response.json(buildFallbackColumnSelectionPlan(profile));
+  }
+
+  return Response.json(normalizeColumnSelectionPlan(profile, parsedPlan.plan));
+}
+
+async function handlePreprocessingReview(request: Request, env: Env) {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const parsedRequest = preprocessingRequestSchema.safeParse(body);
+
+  if (!parsedRequest.success) {
+    return Response.json(
+      {
+        error:
+          "Request must include a valid profile, targetColumn, and keptColumns."
+      },
+      { status: 400 }
+    );
+  }
+
+  const { profile, targetColumn, keptColumns } = parsedRequest.data;
+  const allowedColumns = new Set(profile.columns.map((column) => column.name));
+  const sanitizedKeptColumns = keptColumns.filter(
+    (columnName) =>
+      allowedColumns.has(columnName) && columnName !== targetColumn
+  );
+  const workersai = createWorkersAI({ binding: env.AI });
+  const model = env.AI_MODEL || DEFAULT_AI_MODEL;
+  const result = await generateText({
+    model: workersai(model),
+    system:
+      "You suggest preprocessing steps for selected CSV columns. You output JSON only.",
+    prompt: buildColumnPreprocessingPrompt({
+      profile,
+      targetColumn,
+      keptColumns: sanitizedKeptColumns
+    })
+  });
+  const parsedPreprocessing = parseLlmPreprocessingText(result.text);
+
+  if (!parsedPreprocessing.success) {
+    console.warn("AI preprocessing response could not be parsed", {
+      error: parsedPreprocessing.error,
+      generatedText: result.text.slice(0, 500)
+    });
+
+    return Response.json({
+      preprocessingSuggestions: sanitizedKeptColumns
+        .map((columnName) => {
+          const column = profile.columns.find(
+            (item) => item.name === columnName
+          );
+          if (!column) return null;
+          return defaultPreprocessingSuggestion(
+            column,
+            buildLocalAssumption(column)
+          );
+        })
+        .filter(Boolean),
+      globalWarnings: [
+        "AI preprocessing response could not be parsed. Showing deterministic fallback suggestions."
+      ],
+      nextQuestions: []
+    });
+  }
+
+  const suggestionsByColumn = new Map(
+    parsedPreprocessing.review.preprocessingSuggestions.map((suggestion) => [
+      suggestion.columnName,
+      suggestion
+    ])
+  );
+  const preprocessingSuggestions = sanitizedKeptColumns
+    .map((columnName) => {
+      const column = profile.columns.find((item) => item.name === columnName);
+      if (!column) return null;
+
+      const fallback = defaultPreprocessingSuggestion(
+        column,
+        buildLocalAssumption(column)
+      );
+      const suggestion = suggestionsByColumn.get(columnName);
+      if (!suggestion) return fallback;
+
+      const plausible = plausiblePreprocessingActions(
+        column,
+        buildLocalAssumption(column)
+      );
+      const action = plausible.includes(suggestion.action)
+        ? suggestion.action
+        : fallback.action;
+
+      return {
+        columnName,
+        action,
+        reason: suggestion.reason || fallback.reason,
+        alternatives: uniqueActions([
+          ...suggestion.alternatives.filter((item) => plausible.includes(item)),
+          ...fallback.alternatives
+        ]).filter((item) => item !== action)
+      };
+    })
+    .filter(Boolean);
+
+  return Response.json({
+    preprocessingSuggestions,
+    globalWarnings: [],
+    nextQuestions: []
+  });
 }
 
 export class ChatAgent extends AIChatAgent<Env> {
@@ -684,6 +1447,12 @@ If the user asks to schedule a task or reminder, use the schedule tool.`,
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
+    if (url.pathname === "/api/column-selection") {
+      return await handleColumnSelection(request, env);
+    }
+    if (url.pathname === "/api/preprocessing-review") {
+      return await handlePreprocessingReview(request, env);
+    }
     if (url.pathname === "/api/ai-review") {
       return await handleAiReview(request, env);
     }

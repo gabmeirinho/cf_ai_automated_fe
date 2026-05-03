@@ -160,9 +160,59 @@ export interface TransformationDecision {
   relatedPreprocessingStepIds: string[];
 }
 
+export type PreprocessingSuggestionAction =
+  | "none"
+  | "drop"
+  | "fill_mean"
+  | "fill_median"
+  | "fill_mode"
+  | "one_hot_encode"
+  | "trim_whitespace"
+  | "standardize_missing"
+  | "normalize_boolean"
+  | "split_name";
+
+export interface PreprocessingSuggestion {
+  columnName: string;
+  action: PreprocessingSuggestionAction;
+  reason: string;
+  alternatives: PreprocessingSuggestionAction[];
+}
+
+export type ColumnSelectionDecision = "keep" | "drop" | "review";
+
+export interface TargetSuggestion {
+  columnName: string;
+  reason: string;
+  confidence: ColumnAssumptionConfidence;
+}
+
+export interface ColumnDecision {
+  columnName: string;
+  decision: ColumnSelectionDecision;
+  reason: string;
+  confidence: ColumnAssumptionConfidence;
+  alternatives: ColumnSelectionDecision[];
+}
+
+export interface ColumnSelectionPlan {
+  datasetSummary: string;
+  targetSuggestion?: TargetSuggestion;
+  columnDecisions: ColumnDecision[];
+  globalWarnings: string[];
+  nextQuestions: string[];
+}
+
+export interface ColumnPreprocessingPlan {
+  preprocessingSuggestions: PreprocessingSuggestion[];
+  globalWarnings: string[];
+  nextQuestions: string[];
+}
+
 export interface LlmPreprocessingPlan {
   datasetSummary: string;
   assumptions: ColumnAssumption[];
+  preprocessingSuggestions: PreprocessingSuggestion[];
   decisions: TransformationDecision[];
   globalWarnings: string[];
   nextQuestions: string[];
