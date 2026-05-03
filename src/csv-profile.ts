@@ -167,6 +167,59 @@ export function renderPreviewValue(value: PreviewValue) {
   return text;
 }
 
+function standardizeBooleanValue(value: string, step: PreprocessingStep) {
+  if (step.operation !== "normalize_boolean") return value;
+  const normalized = value.trim().toLowerCase();
+  if (step.trueValues.includes(normalized)) return "true";
+  if (step.falseValues.includes(normalized)) return "false";
+  return value;
+}
+
+function standardizeMissingValue(value: string, step: PreprocessingStep) {
+  if (step.operation !== "standardize_missing_tokens") return value;
+  const normalizedTokens = new Set(
+    step.tokens.map((token) => token.trim().toLowerCase())
+  );
+  return normalizedTokens.has(value.trim().toLowerCase()) ? null : value;
+}
+
+export function applyPreprocessingStepsToPreviewRows(
+  rows: Record<string, PreviewValue>[],
+  steps: PreprocessingStep[]
+) {
+  return rows.map((row) => {
+    const nextRow: Record<string, PreviewValue> = { ...row };
+
+    steps.forEach((step) => {
+      switch (step.operation) {
+        case "trim_whitespace":
+          step.columns.forEach((column) => {
+            const value = nextRow[column];
+            if (typeof value === "string") nextRow[column] = value.trim();
+          });
+          break;
+        case "normalize_boolean": {
+          const value = nextRow[step.column];
+          if (typeof value === "string") {
+            nextRow[step.column] = standardizeBooleanValue(value, step);
+          }
+          break;
+        }
+        case "standardize_missing_tokens":
+          step.columns.forEach((column) => {
+            const value = nextRow[column];
+            if (typeof value === "string") {
+              nextRow[column] = standardizeMissingValue(value, step);
+            }
+          });
+          break;
+      }
+    });
+
+    return nextRow;
+  });
+}
+
 export function buildProfilingNotes(
   field: string,
   values: string[]

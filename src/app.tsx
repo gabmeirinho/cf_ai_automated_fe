@@ -6,12 +6,14 @@ import type { MCPServersState } from "agents";
 import type { ChatAgent } from "./server";
 import {
   MAX_CSV_SIZE_BYTES,
+  applyPreprocessingStepsToPreviewRows,
   describePreprocessingStep,
   formatBytes,
   parseCsvFile,
   renderPreviewValue,
   validateCsvFile,
   type DatasetSummary,
+  type PreprocessingStep,
   type PreprocessingStatus
 } from "./csv-profile";
 import {
@@ -56,6 +58,16 @@ type UploadState =
   | { status: "ready"; summary: DatasetSummary }
   | { status: "error"; message: string };
 
+function getEffectivePreprocessingStep(
+  step: PreprocessingStep,
+  statuses: Record<string, PreprocessingStatus>
+) {
+  return {
+    ...step,
+    status: statuses[step.id] ?? step.status
+  } satisfies PreprocessingStep;
+}
+
 // ── Attachment helpers ────────────────────────────────────────────────
 
 interface Attachment {
@@ -81,6 +93,44 @@ function fileToDataUri(file: File): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+function PreviewTable({
+  columns,
+  rows
+}: {
+  columns: { name: string }[];
+  rows: Record<string, string | number | boolean | null>[];
+}) {
+  return (
+    <div className="overflow-auto border-t border-kumo-line">
+      <table className="min-w-full text-left text-xs">
+        <thead className="bg-kumo-base text-kumo-subtle">
+          <tr>
+            {columns.map((column) => (
+              <th key={column.name} className="px-3 py-2 font-medium">
+                {column.name}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-kumo-line">
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {columns.map((column) => (
+                <td
+                  key={column.name}
+                  className="max-w-52 truncate px-3 py-2 text-kumo-subtle"
+                >
+                  {renderPreviewValue(row[column.name])}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
 }
 
 // ── Small components ──────────────────────────────────────────────────
@@ -528,6 +578,19 @@ function Chat() {
   const canConfirmTarget = Boolean(currentSummary && selectedTarget);
   const proposedPreprocessingSteps =
     currentSummary?.proposedPreprocessingSteps ?? [];
+  const effectivePreprocessingSteps = proposedPreprocessingSteps.map((step) =>
+    getEffectivePreprocessingStep(step, preprocessingStatuses)
+  );
+  const acceptedPreprocessingSteps = effectivePreprocessingSteps.filter(
+    (step) => step.status === "accepted"
+  );
+  const transformedPreviewRows =
+    currentSummary && acceptedPreprocessingSteps.length > 0
+      ? applyPreprocessingStepsToPreviewRows(
+          currentSummary.previewRows,
+          acceptedPreprocessingSteps
+        )
+      : [];
   const updatePreprocessingStatus = useCallback(
     (stepId: string, status: PreprocessingStatus) => {
       setPreprocessingStatuses((current) => ({
@@ -920,10 +983,8 @@ function Chat() {
                         </Text>
                       </div>
                       <div className="grid gap-2">
-                        {proposedPreprocessingSteps.map((step) => {
+                        {effectivePreprocessingSteps.map((step) => {
                           const details = describePreprocessingStep(step);
-                          const status =
-                            preprocessingStatuses[step.id] ?? step.status;
 
                           return (
                             <div
@@ -937,12 +998,12 @@ function Chat() {
                                   </Text>
                                   <Badge
                                     variant={
-                                      status === "accepted"
+                                      step.status === "accepted"
                                         ? "primary"
                                         : "secondary"
                                     }
                                   >
-                                    {status}
+                                    {step.status}
                                   </Badge>
                                 </div>
                                 <Text size="xs" variant="secondary">
@@ -954,7 +1015,7 @@ function Chat() {
                                   type="button"
                                   variant="primary"
                                   size="sm"
-                                  disabled={status === "accepted"}
+                                  disabled={step.status === "accepted"}
                                   onClick={() =>
                                     updatePreprocessingStatus(
                                       step.id,
@@ -968,7 +1029,7 @@ function Chat() {
                                   type="button"
                                   variant="secondary"
                                   size="sm"
-                                  disabled={status === "rejected"}
+                                  disabled={step.status === "rejected"}
                                   onClick={() =>
                                     updatePreprocessingStatus(
                                       step.id,
@@ -985,6 +1046,46 @@ function Chat() {
                       </div>
                     </div>
                   )}
+
+                  <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+                    <div className="mb-3">
+                      <Text size="sm" bold>
+                        Preprocessing pipeline
+                      </Text>
+                      <Text size="xs" variant="secondary">
+                        Accepted steps are tracked separately from the raw
+                        dataset.
+                      </Text>
+                    </div>
+                    {acceptedPreprocessingSteps.length > 0 ? (
+                      <ol className="grid gap-2">
+                        {acceptedPreprocessingSteps.map((step, index) => {
+                          const details = describePreprocessingStep(step);
+
+                          return (
+                            <li
+                              key={step.id}
+                              className="flex items-start gap-2 rounded-lg border border-kumo-line bg-kumo-base p-2"
+                            >
+                              <Badge variant="primary">{index + 1}</Badge>
+                              <div>
+                                <Text size="sm" bold>
+                                  {details.title}
+                                </Text>
+                                <Text size="xs" variant="secondary">
+                                  {details.description}
+                                </Text>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ol>
+                    ) : (
+                      <Text size="xs" variant="secondary">
+                        No preprocessing steps accepted yet.
+                      </Text>
+                    )}
+                  </div>
 
                   <div className="overflow-auto rounded-lg border border-kumo-line">
                     <table className="min-w-full text-left text-sm">
@@ -1040,39 +1141,26 @@ function Chat() {
 
                   <details className="rounded-lg border border-kumo-line bg-kumo-elevated">
                     <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-kumo-default">
-                      Preview first {currentSummary.previewRows.length} rows
+                      Raw preview first {currentSummary.previewRows.length} rows
                     </summary>
-                    <div className="overflow-auto border-t border-kumo-line">
-                      <table className="min-w-full text-left text-xs">
-                        <thead className="bg-kumo-base text-kumo-subtle">
-                          <tr>
-                            {currentSummary.columns.map((column) => (
-                              <th
-                                key={column.name}
-                                className="px-3 py-2 font-medium"
-                              >
-                                {column.name}
-                              </th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-kumo-line">
-                          {currentSummary.previewRows.map((row, rowIndex) => (
-                            <tr key={rowIndex}>
-                              {currentSummary.columns.map((column) => (
-                                <td
-                                  key={column.name}
-                                  className="max-w-52 truncate px-3 py-2 text-kumo-subtle"
-                                >
-                                  {renderPreviewValue(row[column.name])}
-                                </td>
-                              ))}
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                    <PreviewTable
+                      columns={currentSummary.columns}
+                      rows={currentSummary.previewRows}
+                    />
                   </details>
+
+                  {acceptedPreprocessingSteps.length > 0 && (
+                    <details className="rounded-lg border border-kumo-line bg-kumo-elevated">
+                      <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-kumo-default">
+                        Transformed preview first{" "}
+                        {transformedPreviewRows.length} rows
+                      </summary>
+                      <PreviewTable
+                        columns={currentSummary.columns}
+                        rows={transformedPreviewRows}
+                      />
+                    </details>
+                  )}
                 </div>
               )}
             </div>
