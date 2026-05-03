@@ -173,7 +173,7 @@ describe("transformCsvFile", () => {
       { type: "text/csv" }
     );
 
-    const transformed = await transformCsvFile(file, {
+    const result = await transformCsvFile(file, {
       targetColumn: "Survived",
       featureColumns: ["Name", "Embarked"],
       preprocessingSteps: [
@@ -183,6 +183,8 @@ describe("transformCsvFile", () => {
         { columnName: "Embarked", action: "One-hot encode categories" }
       ]
     });
+    const transformed =
+      result as import("./csv-profile").CsvTransformationResult;
 
     expect(transformed.outputColumns).toEqual([
       "Name_first",

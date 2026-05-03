@@ -18,7 +18,8 @@ import {
   type ColumnSelectionPlan,
   type SelectedPreprocessingStep,
   type PreprocessingSuggestionAction,
-  type ProfilingNoteCode
+  type ProfilingNoteCode,
+  type SplitConfig
 } from "./csv-profile";
 import {
   Badge,
@@ -53,8 +54,14 @@ import {
 type UploadState =
   | { status: "idle" }
   | { status: "validating"; fileName: string }
+  | { status: "choosing_split"; fileName: string; file: File; rowCount: number }
   | { status: "parsing"; fileName: string }
-  | { status: "ready"; summary: DatasetSummary; file: File }
+  | {
+      status: "ready";
+      summary: DatasetSummary;
+      file: File;
+      splitConfig?: SplitConfig;
+    }
   | { status: "error"; message: string };
 
 const PREVIEW_VISIBLE_COLUMN_COUNT = 10;
@@ -1832,6 +1839,86 @@ function PreparationReviewPanel({
   );
 }
 
+function SplitConfigPanel({
+  fileName,
+  rowCount,
+  onConfirm,
+  onCancel
+}: {
+  fileName: string;
+  rowCount: number;
+  onConfirm: (config: SplitConfig) => void;
+  onCancel: () => void;
+}) {
+  const [trainRatio, setTrainRatio] = useState(0.7);
+  const [seed, setSeed] = useState(42);
+  const trainCount = Math.round(rowCount * trainRatio);
+  const testCount = rowCount - trainCount;
+
+  return (
+    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-4">
+      <div className="mb-2">
+        <Text size="sm" bold>
+          Train/test split
+        </Text>
+      </div>
+      <div className="mb-3">
+        <Text size="xs" variant="secondary">
+          {fileName} &mdash; {rowCount.toLocaleString()} rows total. Choose a
+          split before profiling. Only training rows will be analysed and
+          previewed.
+        </Text>
+      </div>
+
+      <div className="mb-3">
+        <Text size="xs" variant="secondary">
+          Train ratio: {Math.round(trainRatio * 100)}%
+        </Text>
+        <input
+          type="range"
+          min={0.5}
+          max={0.9}
+          step={0.05}
+          value={trainRatio}
+          className="w-full accent-kumo-brand"
+          onChange={(e) => setTrainRatio(Number(e.target.value))}
+        />
+        <div className="flex justify-between text-xs text-kumo-subtle">
+          <span>{trainCount.toLocaleString()} train</span>
+          <span>{testCount.toLocaleString()} held out</span>
+        </div>
+      </div>
+
+      <div className="mb-4">
+        <Text size="xs" variant="secondary">
+          Seed
+        </Text>
+        <input
+          type="number"
+          value={seed}
+          min={0}
+          className="mt-1 h-8 w-24 rounded-md border border-kumo-line bg-kumo-base px-2 text-sm text-kumo-default outline-none focus:ring-2 focus:ring-kumo-ring"
+          onChange={(e) => setSeed(Number(e.target.value) || 0)}
+        />
+      </div>
+
+      <div className="flex gap-2">
+        <Button
+          type="button"
+          variant="primary"
+          size="sm"
+          onClick={() => onConfirm({ trainRatio, seed })}
+        >
+          Confirm split &amp; profile
+        </Button>
+        <Button type="button" variant="secondary" size="sm" onClick={onCancel}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function SortableColumnHeader({
   label,
   sortKey,
@@ -2210,34 +2297,79 @@ function DatasetWorkspace() {
 
     setTransformState({ status: "running" });
     try {
-      const transformed = await transformCsvFile(currentFile, {
-        targetColumn,
-        featureColumns,
-        preprocessingSteps
-      });
-      const blob = new Blob([transformed.csv], {
-        type: "text/csv;charset=utf-8"
-      });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      const baseName = currentSummary.fileName.replace(/\.csv$/i, "");
+      const splitConfig: SplitConfig | undefined =
+        uploadState.status === "ready" ? uploadState.splitConfig : undefined;
+      const result = await transformCsvFile(
+        currentFile,
+        { targetColumn, featureColumns, preprocessingSteps },
+        splitConfig
+      );
 
-      link.href = url;
-      link.download = `${baseName || "dataset"}-transformed.csv`;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      URL.revokeObjectURL(url);
-      setTransformState({
-        status: "ready",
-        audit: transformed.audit,
-        rowCount: transformed.rowCount,
-        columns: transformed.outputColumns.length
-      });
-      toasts.add({
-        title: "Transformed CSV ready",
-        description: `${transformed.rowCount.toLocaleString()} rows exported.`
-      });
+      if ("trainCsv" in result) {
+        // Split export — download train CSV
+        const trainBlob = new Blob([result.trainCsv], {
+          type: "text/csv;charset=utf-8"
+        });
+        const trainUrl = URL.createObjectURL(trainBlob);
+        const trainLink = document.createElement("a");
+        const baseName = currentSummary.fileName.replace(/\.csv$/i, "");
+
+        trainLink.href = trainUrl;
+        trainLink.download = `${baseName || "dataset"}-train.csv`;
+        document.body.appendChild(trainLink);
+        trainLink.click();
+        trainLink.remove();
+        URL.revokeObjectURL(trainUrl);
+
+        // Download test CSV
+        const testBlob = new Blob([result.testCsv], {
+          type: "text/csv;charset=utf-8"
+        });
+        const testUrl = URL.createObjectURL(testBlob);
+        const testLink = document.createElement("a");
+        testLink.href = testUrl;
+        testLink.download = `${baseName || "dataset"}-test.csv`;
+        document.body.appendChild(testLink);
+        testLink.click();
+        testLink.remove();
+        URL.revokeObjectURL(testUrl);
+
+        setTransformState({
+          status: "ready",
+          audit: result.audit,
+          rowCount: result.trainRowCount,
+          columns: result.outputColumns.length
+        });
+        toasts.add({
+          title: "Train/test CSVs exported",
+          description: `${result.trainRowCount.toLocaleString()} train + ${result.testRowCount.toLocaleString()} test rows.`
+        });
+      } else {
+        // Single export (no split)
+        const blob = new Blob([result.csv], {
+          type: "text/csv;charset=utf-8"
+        });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        const baseName = currentSummary.fileName.replace(/\.csv$/i, "");
+
+        link.href = url;
+        link.download = `${baseName || "dataset"}-transformed.csv`;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
+        setTransformState({
+          status: "ready",
+          audit: result.audit,
+          rowCount: result.rowCount,
+          columns: result.outputColumns.length
+        });
+        toasts.add({
+          title: "Transformed CSV ready",
+          description: `${result.rowCount.toLocaleString()} rows exported.`
+        });
+      }
     } catch (error) {
       setTransformState({
         status: "error",
@@ -2254,8 +2386,59 @@ function DatasetWorkspace() {
     finalizedFeatureColumns,
     preprocessingChoices,
     targetColumn,
-    toasts
+    toasts,
+    uploadState
   ]);
+
+  const handleSplitConfirm = useCallback(
+    async (splitConfig: SplitConfig) => {
+      const currentFile =
+        uploadState.status === "choosing_split" ? uploadState.file : null;
+      if (!currentFile) return;
+
+      setUploadState({ status: "parsing", fileName: currentFile.name });
+      try {
+        const summary = await parseCsvFile(currentFile, splitConfig);
+        setUploadState({
+          status: "ready",
+          summary,
+          file: currentFile,
+          splitConfig
+        });
+        setAiReviewState({ status: "idle" });
+        setPreprocessingReviewState({ status: "idle" });
+        setTransformState({ status: "idle" });
+        setTargetColumn(null);
+        setColumnActions({});
+        setFinalizedFeatureColumns(null);
+        setPreprocessingChoices({});
+        const heldOut = Math.round(
+          summary.parsedRowCount / splitConfig.trainRatio -
+            summary.parsedRowCount
+        );
+        toasts.add({
+          title: "Training set profiled",
+          description: `${summary.parsedRowCount.toLocaleString()} training rows (${heldOut.toLocaleString()} held out as test).`
+        });
+      } catch (error) {
+        setUploadState({
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "The CSV could not be parsed."
+        });
+      } finally {
+        if (csvInputRef.current) csvInputRef.current.value = "";
+      }
+    },
+    [toasts, uploadState.status]
+  );
+
+  const handleSplitCancel = useCallback(() => {
+    setUploadState({ status: "idle" });
+    if (csvInputRef.current) csvInputRef.current.value = "";
+  }, []);
 
   const generatePreprocessingReview = useCallback(async () => {
     if (!currentSummary || !targetColumn) return;
@@ -2352,31 +2535,22 @@ function DatasetWorkspace() {
         return;
       }
 
-      setUploadState({ status: "parsing", fileName: file.name });
+      // Quick row count via file text to show split config
       try {
-        const summary = await parseCsvFile(file);
-        setUploadState({ status: "ready", summary, file });
-        setAiReviewState({ status: "idle" });
-        setPreprocessingReviewState({ status: "idle" });
-        setTransformState({ status: "idle" });
-        setTargetColumn(null);
-        setColumnActions({});
-        setFinalizedFeatureColumns(null);
-        setPreprocessingChoices({});
-        toasts.add({
-          title: "CSV parsed",
-          description: `${summary.parsedRowCount.toLocaleString()} rows, ${summary.columns.length} columns`
+        const text = await file.text();
+        const rowCount =
+          text.split("\n").filter((line) => line.trim()).length - 1;
+        setUploadState({
+          status: "choosing_split",
+          fileName: file.name,
+          file,
+          rowCount: Math.max(0, rowCount)
         });
-      } catch (error) {
+      } catch {
         setUploadState({
           status: "error",
-          message:
-            error instanceof Error
-              ? error.message
-              : "The CSV could not be parsed."
+          message: "Could not read the CSV file."
         });
-      } finally {
-        if (csvInputRef.current) csvInputRef.current.value = "";
       }
     },
     [toasts, uploadState.status]
@@ -2477,12 +2651,21 @@ function DatasetWorkspace() {
           </Text>
           <Text size="xs" variant="secondary">
             `.csv` only, up to {formatBytes(MAX_CSV_SIZE_BYTES)}. Profiling runs
-            locally in the browser.
+            locally in the browser. You will choose a train/test split before
+            analysis begins.
           </Text>
         </div>
 
         {uploadState.status === "validating" && (
           <Badge variant="secondary">Validating {uploadState.fileName}</Badge>
+        )}
+        {uploadState.status === "choosing_split" && (
+          <SplitConfigPanel
+            fileName={uploadState.fileName}
+            rowCount={uploadState.rowCount}
+            onConfirm={handleSplitConfirm}
+            onCancel={handleSplitCancel}
+          />
         )}
         {uploadState.status === "parsing" && (
           <Badge variant="secondary">Parsing {uploadState.fileName}</Badge>
@@ -2514,12 +2697,26 @@ function DatasetWorkspace() {
               </div>
               <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
                 <Text size="xs" variant="secondary">
-                  Rows sampled
+                  Rows (training)
                 </Text>
                 <Text size="sm" bold>
                   {currentSummary.parsedRowCount.toLocaleString()}
                 </Text>
               </div>
+              {uploadState.status === "ready" && uploadState.splitConfig && (
+                <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+                  <Text size="xs" variant="secondary">
+                    Held out (test)
+                  </Text>
+                  <Text size="sm" bold>
+                    {Math.round(
+                      currentSummary.parsedRowCount /
+                        uploadState.splitConfig.trainRatio -
+                        currentSummary.parsedRowCount
+                    ).toLocaleString()}
+                  </Text>
+                </div>
+              )}
               <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
                 <Text size="xs" variant="secondary">
                   Columns
@@ -2530,8 +2727,21 @@ function DatasetWorkspace() {
               </div>
             </div>
 
-            {currentSummary.warnings.length > 0 && (
+            {(currentSummary.warnings.length > 0 ||
+              (uploadState.status === "ready" && uploadState.splitConfig)) && (
               <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 px-3 py-2">
+                {uploadState.status === "ready" && uploadState.splitConfig && (
+                  <Text size="xs">
+                    Test set (
+                    {Math.round(
+                      currentSummary.parsedRowCount /
+                        uploadState.splitConfig.trainRatio -
+                        currentSummary.parsedRowCount
+                    ).toLocaleString()}{" "}
+                    rows) is held out and excluded from all profiling, preview,
+                    and statistics.
+                  </Text>
+                )}
                 {currentSummary.warnings.map((warning) => (
                   <Text key={warning} size="xs">
                     {warning}

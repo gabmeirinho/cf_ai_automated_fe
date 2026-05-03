@@ -180,6 +180,20 @@ export interface CsvTransformationResult {
   audit: string[];
 }
 
+export interface SplitConfig {
+  trainRatio: number;
+  seed: number;
+}
+
+export interface SplitExportResult {
+  trainCsv: string;
+  testCsv: string;
+  trainRowCount: number;
+  testRowCount: number;
+  outputColumns: string[];
+  audit: string[];
+}
+
 export interface PreprocessingSuggestion {
   columnName: string;
   action: PreprocessingSuggestionAction;
@@ -527,6 +541,15 @@ export function renderPreviewValue(value: PreviewValue) {
   if (text === "") return '""';
   if (text !== text.trim()) return JSON.stringify(text);
   return text;
+}
+
+export function isTrainingRow(
+  rowIndex: number,
+  seed: number,
+  trainRatio: number
+): boolean {
+  const hash = (Math.imul(rowIndex + 1, 2654435761) ^ seed) >>> 0;
+  return (hash % 10000) / 10000 < trainRatio;
 }
 
 function normalizeActionName(action: string) {
@@ -1311,10 +1334,56 @@ function validateTransformationPlan(
   });
 }
 
+function transformRow(
+  row: Record<string, unknown>,
+  plan: CsvTransformationPlan,
+  stepsByColumn: Map<string, string[]>,
+  stats: Map<
+    string,
+    { mean?: string; median?: string; mode?: string; categories?: string[] }
+  >
+) {
+  const output: Record<string, string> = {};
+
+  plan.featureColumns.forEach((columnName) => {
+    const actions = sortColumnActions(stepsByColumn.get(columnName) ?? []);
+    const columnStats = stats.get(columnName) ?? {};
+    const transformedValue = transformColumnValue(
+      getCell(row, columnName),
+      actions,
+      columnStats
+    );
+
+    if (actions.some(isDropColumnAction)) return;
+
+    if (actions.some(isSplitNameAction)) {
+      const parsedName = parseFullName(transformedValue);
+      output[`${columnName}_first`] = parsedName.first;
+      output[`${columnName}_last`] = parsedName.last;
+      return;
+    }
+
+    if (actions.some(isOneHotAction)) {
+      const categories = columnStats.categories ?? [];
+      categories.forEach((category) => {
+        output[`${columnName}__${sanitizeColumnSuffix(category)}`] =
+          transformedValue.trim() === category ? "1" : "0";
+      });
+      return;
+    }
+
+    output[columnName] = transformedValue;
+  });
+
+  output[plan.targetColumn] = getCell(row, plan.targetColumn);
+  return output;
+}
+
 export async function transformCsvFile(
   file: File,
-  plan: CsvTransformationPlan
-): Promise<CsvTransformationResult> {
+  plan: CsvTransformationPlan,
+  splitConfig?: SplitConfig
+): Promise<CsvTransformationResult | SplitExportResult> {
   const source = await file.text();
   const parsed = Papa.parse<Record<string, unknown>>(source, {
     header: true,
@@ -1343,47 +1412,95 @@ export async function transformCsvFile(
   validateTransformationPlan(fields, plan);
 
   const stepsByColumn = groupStepsByColumn(plan.preprocessingSteps);
+
+  if (splitConfig) {
+    // --- Split path: fit on training, transform both ---
+    const trainRows: typeof parsed.data = [];
+    const testRows: typeof parsed.data = [];
+
+    parsed.data.forEach((row, index) => {
+      if (isTrainingRow(index, splitConfig.seed, splitConfig.trainRatio)) {
+        trainRows.push(row);
+      } else {
+        testRows.push(row);
+      }
+    });
+
+    // Fit statistics on training rows only
+    const trainStats = buildTransformStats(
+      trainRows,
+      plan.featureColumns,
+      stepsByColumn
+    );
+
+    // Transform both splits using the same fitted stats
+    const trainOutputRows = trainRows.map((row) =>
+      transformRow(row, plan, stepsByColumn, trainStats)
+    );
+    const testOutputRows = testRows.map((row) =>
+      transformRow(row, plan, stepsByColumn, trainStats)
+    );
+
+    const outputColumns = Array.from(
+      new Set(
+        [...trainOutputRows, ...testOutputRows].flatMap((row) =>
+          Object.keys(row)
+        )
+      )
+    );
+
+    // Strip one-hot columns from test that weren't seen in training
+    const trainingCategoryColumns = new Set<string>();
+    plan.featureColumns.forEach((columnName) => {
+      const stats = trainStats.get(columnName);
+      stats?.categories?.forEach((cat) =>
+        trainingCategoryColumns.add(
+          `${columnName}__${sanitizeColumnSuffix(cat)}`
+        )
+      );
+    });
+
+    const sanitizedTestRows = testOutputRows.map((row) => {
+      const sanitized: Record<string, string> = {};
+      Object.entries(row).forEach(([key, value]) => {
+        if (
+          key === plan.targetColumn ||
+          !key.includes("__") ||
+          trainingCategoryColumns.has(key)
+        ) {
+          sanitized[key] = value;
+        }
+      });
+      return sanitized;
+    });
+
+    const audit = [
+      `Target ${plan.targetColumn} was kept unchanged and excluded from feature transforms.`,
+      `${plan.featureColumns.length.toLocaleString()} feature column${plan.featureColumns.length === 1 ? "" : "s"} were eligible for export.`,
+      `${plan.preprocessingSteps.filter((step) => !isNoStepAction(step.action)).length.toLocaleString()} preprocessing step${plan.preprocessingSteps.length === 1 ? "" : "s"} applied.`,
+      `Fitted statistics computed from training set only.`,
+      `${testRows.length.toLocaleString()} test rows held out during fit.`
+    ];
+
+    return {
+      trainCsv: Papa.unparse(trainOutputRows, { columns: outputColumns }),
+      testCsv: Papa.unparse(sanitizedTestRows, { columns: outputColumns }),
+      trainRowCount: trainOutputRows.length,
+      testRowCount: sanitizedTestRows.length,
+      outputColumns,
+      audit
+    };
+  }
+
+  // --- No-split path (existing behaviour) ---
   const transformStats = buildTransformStats(
     parsed.data,
     plan.featureColumns,
     stepsByColumn
   );
-  const outputRows = parsed.data.map((row) => {
-    const output: Record<string, string> = {};
-
-    plan.featureColumns.forEach((columnName) => {
-      const actions = sortColumnActions(stepsByColumn.get(columnName) ?? []);
-      const columnStats = transformStats.get(columnName) ?? {};
-      const transformedValue = transformColumnValue(
-        getCell(row, columnName),
-        actions,
-        columnStats
-      );
-
-      if (actions.some(isDropColumnAction)) return;
-
-      if (actions.some(isSplitNameAction)) {
-        const parsedName = parseFullName(transformedValue);
-        output[`${columnName}_first`] = parsedName.first;
-        output[`${columnName}_last`] = parsedName.last;
-        return;
-      }
-
-      if (actions.some(isOneHotAction)) {
-        const categories = columnStats.categories ?? [];
-        categories.forEach((category) => {
-          output[`${columnName}__${sanitizeColumnSuffix(category)}`] =
-            transformedValue.trim() === category ? "1" : "0";
-        });
-        return;
-      }
-
-      output[columnName] = transformedValue;
-    });
-
-    output[plan.targetColumn] = getCell(row, plan.targetColumn);
-    return output;
-  });
+  const outputRows = parsed.data.map((row) =>
+    transformRow(row, plan, stepsByColumn, transformStats)
+  );
   const outputColumns = Array.from(
     outputRows.reduce((columns, row) => {
       Object.keys(row).forEach((columnName) => columns.add(columnName));
@@ -1405,7 +1522,10 @@ export async function transformCsvFile(
   };
 }
 
-export async function parseCsvFile(file: File): Promise<DatasetSummary> {
+export async function parseCsvFile(
+  file: File,
+  splitConfig?: SplitConfig
+): Promise<DatasetSummary> {
   const source =
     !("FileReader" in globalThis) && !("FileReaderSync" in globalThis)
       ? await file.text()
@@ -1415,6 +1535,7 @@ export async function parseCsvFile(file: File): Promise<DatasetSummary> {
     let generatedHeaderCount = 0;
     let profiler: CsvProfiler | null = null;
     let failed = false;
+    let globalRowIndex = 0;
 
     const rejectOnce = (error: Error) => {
       if (failed) return;
@@ -1468,7 +1589,19 @@ export async function parseCsvFile(file: File): Promise<DatasetSummary> {
 
         results.data.forEach((row) => {
           if (!profiler) return;
+          if (
+            splitConfig &&
+            !isTrainingRow(
+              globalRowIndex,
+              splitConfig.seed,
+              splitConfig.trainRatio
+            )
+          ) {
+            globalRowIndex += 1;
+            return;
+          }
           addProfilerRow(profiler, row);
+          globalRowIndex += 1;
         });
       },
       complete: () => {
