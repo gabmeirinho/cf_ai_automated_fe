@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   MAX_CSV_SIZE_BYTES,
   applyPreprocessingStepsToPreviewRows,
@@ -7,13 +7,17 @@ import {
   parseCsvFile,
   renderPreviewValue,
   validateCsvFile,
+  type ColumnSummary,
   type DatasetSummary,
+  type ProfilingNoteCode,
   type PreprocessingStep,
   type PreprocessingStatus
 } from "./csv-profile";
 import { Badge, Button, Empty, Surface, Text } from "@cloudflare/kumo";
 import { Toasty, useKumoToastManager } from "@cloudflare/kumo/components/toast";
 import {
+  CaretDownIcon,
+  CaretUpIcon,
   CheckCircleIcon,
   MoonIcon,
   PaperclipIcon,
@@ -29,6 +33,91 @@ type UploadState =
   | { status: "error"; message: string };
 
 const PREVIEW_VISIBLE_COLUMN_COUNT = 10;
+
+type ColumnFilter =
+  | "all"
+  | "has_notes"
+  | "high_missingness"
+  | "empty"
+  | "constant"
+  | "likely_identifier";
+
+type ColumnSortKey =
+  | "name"
+  | "type"
+  | "missingCount"
+  | "missingPercent"
+  | "uniqueCount"
+  | "notesCount";
+
+type SortDirection = "asc" | "desc";
+
+interface ColumnSort {
+  key: ColumnSortKey;
+  direction: SortDirection;
+}
+
+const COLUMN_FILTERS: Array<{
+  key: ColumnFilter;
+  label: string;
+}> = [
+  { key: "all", label: "All" },
+  { key: "has_notes", label: "Has notes" },
+  { key: "high_missingness", label: "High missingness" },
+  { key: "empty", label: "Empty" },
+  { key: "constant", label: "Constant" },
+  { key: "likely_identifier", label: "Likely ID" }
+];
+
+function formatPercent(value: number) {
+  return `${value.toFixed(value < 10 && value > 0 ? 1 : 0)}%`;
+}
+
+function hasProfilingNote(column: ColumnSummary, code: ProfilingNoteCode) {
+  return column.profilingNotes.some((note) => note.code === code);
+}
+
+function getMissingPercent(column: ColumnSummary, rowCount: number) {
+  return rowCount === 0 ? 0 : (column.missingCount / rowCount) * 100;
+}
+
+function getColumnSortValue(
+  column: ColumnSummary,
+  key: ColumnSortKey,
+  rowCount: number
+) {
+  switch (key) {
+    case "name":
+      return column.name.toLowerCase();
+    case "type":
+      return column.inferredType;
+    case "missingCount":
+      return column.missingCount;
+    case "missingPercent":
+      return getMissingPercent(column, rowCount);
+    case "uniqueCount":
+      return column.uniqueCount;
+    case "notesCount":
+      return column.profilingNotes.length;
+  }
+}
+
+function filterColumn(column: ColumnSummary, filter: ColumnFilter) {
+  switch (filter) {
+    case "all":
+      return true;
+    case "has_notes":
+      return column.profilingNotes.length > 0;
+    case "high_missingness":
+      return hasProfilingNote(column, "high_missingness");
+    case "empty":
+      return hasProfilingNote(column, "empty_column");
+    case "constant":
+      return hasProfilingNote(column, "constant_column");
+    case "likely_identifier":
+      return hasProfilingNote(column, "likely_identifier");
+  }
+}
 
 function getEffectivePreprocessingStep(
   step: PreprocessingStep,
@@ -116,6 +205,38 @@ function PreviewTable({
   );
 }
 
+function SortableColumnHeader({
+  label,
+  sortKey,
+  currentSort,
+  onSort
+}: {
+  label: string;
+  sortKey: ColumnSortKey;
+  currentSort: ColumnSort;
+  onSort: (key: ColumnSortKey) => void;
+}) {
+  const active = currentSort.key === sortKey;
+
+  return (
+    <th className="px-3 py-2 font-medium">
+      <button
+        type="button"
+        className="inline-flex items-center gap-1 text-left text-kumo-subtle hover:text-kumo-default"
+        onClick={() => onSort(sortKey)}
+      >
+        {label}
+        {active &&
+          (currentSort.direction === "asc" ? (
+            <CaretUpIcon size={12} weight="bold" />
+          ) : (
+            <CaretDownIcon size={12} weight="bold" />
+          ))}
+      </button>
+    </th>
+  );
+}
+
 function DatasetWorkspace() {
   const toasts = useKumoToastManager();
   const csvInputRef = useRef<HTMLInputElement>(null);
@@ -126,6 +247,11 @@ function DatasetWorkspace() {
   const [preprocessingStatuses, setPreprocessingStatuses] = useState<
     Record<string, PreprocessingStatus>
   >({});
+  const [columnFilter, setColumnFilter] = useState<ColumnFilter>("all");
+  const [columnSort, setColumnSort] = useState<ColumnSort>({
+    key: "notesCount",
+    direction: "desc"
+  });
 
   const currentSummary =
     uploadState.status === "ready" ? uploadState.summary : null;
@@ -144,6 +270,68 @@ function DatasetWorkspace() {
           acceptedPreprocessingSteps
         )
       : [];
+  const columnQualityCounts = useMemo(() => {
+    const columns = currentSummary?.columns ?? [];
+
+    return {
+      hasNotes: columns.filter((column) => column.profilingNotes.length > 0)
+        .length,
+      highMissingness: columns.filter((column) =>
+        hasProfilingNote(column, "high_missingness")
+      ).length,
+      likelyIdentifiers: columns.filter((column) =>
+        hasProfilingNote(column, "likely_identifier")
+      ).length,
+      empty: columns.filter((column) =>
+        hasProfilingNote(column, "empty_column")
+      ).length,
+      constant: columns.filter((column) =>
+        hasProfilingNote(column, "constant_column")
+      ).length
+    };
+  }, [currentSummary]);
+  const visibleColumns = useMemo(() => {
+    if (!currentSummary) return [];
+    const direction = columnSort.direction === "asc" ? 1 : -1;
+
+    return [...currentSummary.columns]
+      .filter((column) => filterColumn(column, columnFilter))
+      .sort((left, right) => {
+        const leftValue = getColumnSortValue(
+          left,
+          columnSort.key,
+          currentSummary.parsedRowCount
+        );
+        const rightValue = getColumnSortValue(
+          right,
+          columnSort.key,
+          currentSummary.parsedRowCount
+        );
+
+        if (typeof leftValue === "number" && typeof rightValue === "number") {
+          if (leftValue !== rightValue)
+            return (leftValue - rightValue) * direction;
+        } else {
+          const comparison = String(leftValue).localeCompare(
+            String(rightValue)
+          );
+          if (comparison !== 0) return comparison * direction;
+        }
+
+        if (columnSort.key !== "notesCount") {
+          const notesDelta =
+            right.profilingNotes.length - left.profilingNotes.length;
+          if (notesDelta !== 0) return notesDelta;
+        }
+
+        const missingDelta =
+          getMissingPercent(right, currentSummary.parsedRowCount) -
+          getMissingPercent(left, currentSummary.parsedRowCount);
+        if (missingDelta !== 0) return missingDelta;
+
+        return left.name.localeCompare(right.name);
+      });
+  }, [columnFilter, columnSort, currentSummary]);
 
   const updatePreprocessingStatus = useCallback(
     (stepId: string, status: PreprocessingStatus) => {
@@ -154,10 +342,19 @@ function DatasetWorkspace() {
     },
     []
   );
+  const updateColumnSort = useCallback((key: ColumnSortKey) => {
+    setColumnSort((current) => ({
+      key,
+      direction:
+        current.key === key && current.direction === "desc" ? "asc" : "desc"
+    }));
+  }, []);
 
   const resetWorkspace = useCallback(() => {
     setUploadState({ status: "idle" });
     setPreprocessingStatuses({});
+    setColumnFilter("all");
+    setColumnSort({ key: "notesCount", direction: "desc" });
     if (csvInputRef.current) csvInputRef.current.value = "";
   }, []);
 
@@ -469,51 +666,138 @@ function DatasetWorkspace() {
               )}
             </div>
 
-            <div className="overflow-auto rounded-lg border border-kumo-line">
-              <table className="min-w-full text-left text-sm">
-                <thead className="bg-kumo-elevated text-kumo-subtle">
-                  <tr>
-                    <th className="px-3 py-2 font-medium">Column</th>
-                    <th className="px-3 py-2 font-medium">Type</th>
-                    <th className="px-3 py-2 font-medium">Missing</th>
-                    <th className="px-3 py-2 font-medium">Samples</th>
-                    <th className="px-3 py-2 font-medium">Notes</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-kumo-line">
-                  {currentSummary.columns.map((column) => (
-                    <tr key={column.name}>
-                      <td className="px-3 py-2 font-medium text-kumo-default">
-                        {column.name}
-                      </td>
-                      <td className="px-3 py-2 text-kumo-subtle">
-                        {column.inferredType}
-                      </td>
-                      <td className="px-3 py-2 text-kumo-subtle">
-                        {column.missingCount}
-                      </td>
-                      <td className="px-3 py-2 text-kumo-subtle">
-                        {column.sampleValues.length > 0
-                          ? column.sampleValues.join(", ")
-                          : "No non-empty samples"}
-                      </td>
-                      <td className="px-3 py-2 text-kumo-subtle">
-                        {column.profilingNotes.length > 0 ? (
-                          <div className="grid gap-1">
-                            {column.profilingNotes.map((note) => (
-                              <span key={note.code}>
-                                {note.message} ({note.affectedCount})
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          "No notes"
-                        )}
-                      </td>
-                    </tr>
+            <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
+              <div className="grid gap-3 border-b border-kumo-line p-3">
+                <div className="flex flex-wrap gap-2">
+                  <Badge variant="secondary">
+                    {columnQualityCounts.hasNotes} columns with notes
+                  </Badge>
+                  <Badge variant="secondary">
+                    {columnQualityCounts.highMissingness} high missingness
+                  </Badge>
+                  <Badge variant="secondary">
+                    {columnQualityCounts.likelyIdentifiers} likely IDs
+                  </Badge>
+                  <Badge variant="secondary">
+                    {columnQualityCounts.empty} empty
+                  </Badge>
+                  <Badge variant="secondary">
+                    {columnQualityCounts.constant} constant
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {COLUMN_FILTERS.map((filter) => (
+                    <Button
+                      key={filter.key}
+                      type="button"
+                      size="sm"
+                      variant={
+                        columnFilter === filter.key ? "primary" : "secondary"
+                      }
+                      onClick={() => setColumnFilter(filter.key)}
+                    >
+                      {filter.label}
+                    </Button>
                   ))}
-                </tbody>
-              </table>
+                </div>
+              </div>
+
+              <div className="overflow-auto">
+                <table className="min-w-full text-left text-sm">
+                  <thead className="bg-kumo-elevated text-kumo-subtle">
+                    <tr>
+                      <SortableColumnHeader
+                        label="Column"
+                        sortKey="name"
+                        currentSort={columnSort}
+                        onSort={updateColumnSort}
+                      />
+                      <SortableColumnHeader
+                        label="Type"
+                        sortKey="type"
+                        currentSort={columnSort}
+                        onSort={updateColumnSort}
+                      />
+                      <SortableColumnHeader
+                        label="Missing"
+                        sortKey="missingCount"
+                        currentSort={columnSort}
+                        onSort={updateColumnSort}
+                      />
+                      <SortableColumnHeader
+                        label="% missing"
+                        sortKey="missingPercent"
+                        currentSort={columnSort}
+                        onSort={updateColumnSort}
+                      />
+                      <SortableColumnHeader
+                        label="Unique"
+                        sortKey="uniqueCount"
+                        currentSort={columnSort}
+                        onSort={updateColumnSort}
+                      />
+                      <th className="px-3 py-2 font-medium">Samples</th>
+                      <SortableColumnHeader
+                        label="Notes"
+                        sortKey="notesCount"
+                        currentSort={columnSort}
+                        onSort={updateColumnSort}
+                      />
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-kumo-line">
+                    {visibleColumns.map((column) => (
+                      <tr key={column.name}>
+                        <td className="px-3 py-2 font-medium text-kumo-default">
+                          {column.name}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
+                          {column.inferredType}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
+                          {column.missingCount}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
+                          {formatPercent(
+                            getMissingPercent(
+                              column,
+                              currentSummary.parsedRowCount
+                            )
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
+                          {column.uniqueCount.toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
+                          {column.sampleValues.length > 0
+                            ? column.sampleValues.join(", ")
+                            : "No non-empty samples"}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
+                          {column.profilingNotes.length > 0 ? (
+                            <div className="grid gap-1">
+                              {column.profilingNotes.map((note) => (
+                                <span key={note.code}>
+                                  {note.message} ({note.affectedCount})
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            "No notes"
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {visibleColumns.length === 0 && (
+                  <div className="border-t border-kumo-line px-3 py-4">
+                    <Text size="sm" variant="secondary">
+                      No columns match the selected filter.
+                    </Text>
+                  </div>
+                )}
+              </div>
             </div>
 
             <details className="min-w-0 overflow-hidden rounded-lg border border-kumo-line bg-kumo-elevated">

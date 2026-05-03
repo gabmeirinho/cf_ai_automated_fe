@@ -3,6 +3,9 @@ import Papa from "papaparse";
 export const MAX_CSV_SIZE_BYTES = 10 * 1024 * 1024;
 const MAX_INFERENCE_ROWS = 1000;
 const MAX_PREVIEW_ROWS = 20;
+const HIGH_MISSINGNESS_THRESHOLD = 0.3;
+const LIKELY_IDENTIFIER_UNIQUE_RATIO = 0.95;
+const MIN_IDENTIFIER_ROW_COUNT = 10;
 
 export type InferredColumnType =
   | "string"
@@ -20,7 +23,11 @@ export type ProfilingNoteCode =
   | "numeric_after_trim"
   | "boolean_after_case_fold"
   | "date_after_trim"
-  | "missing_like_tokens";
+  | "missing_like_tokens"
+  | "high_missingness"
+  | "constant_column"
+  | "likely_identifier"
+  | "empty_column";
 
 export type PreprocessingStatus = "proposed" | "accepted" | "rejected";
 
@@ -57,6 +64,7 @@ export interface ColumnSummary {
   name: string;
   inferredType: InferredColumnType;
   missingCount: number;
+  uniqueCount: number;
   sampleValues: string[];
   profilingNotes: ProfilingNote[];
 }
@@ -225,6 +233,10 @@ export function buildProfilingNotes(
   values: string[]
 ): ProfilingNote[] {
   const notes: ProfilingNote[] = [];
+  const missingCount = values.filter(isMissing).length;
+  const presentValues = values.filter((value) => !isMissing(value));
+  const uniqueCount = new Set(presentValues).size;
+  const missingRatio = values.length === 0 ? 0 : missingCount / values.length;
   const whitespaceCount = values.filter(
     (value) => value.length > 0 && value !== value.trim()
   ).length;
@@ -296,6 +308,36 @@ export function buildProfilingNotes(
       code: "missing_like_tokens",
       message: `${field} contains tokens that commonly represent missing values.`,
       affectedCount: missingLikeTokenCount
+    });
+  }
+  if (missingCount === values.length) {
+    notes.push({
+      code: "empty_column",
+      message: `${field} has no non-empty values.`,
+      affectedCount: missingCount
+    });
+  } else if (missingRatio >= HIGH_MISSINGNESS_THRESHOLD) {
+    notes.push({
+      code: "high_missingness",
+      message: `${field} is missing at least ${Math.round(HIGH_MISSINGNESS_THRESHOLD * 100)}% of sampled rows.`,
+      affectedCount: missingCount
+    });
+  }
+  if (uniqueCount === 1 && presentValues.length > 0) {
+    notes.push({
+      code: "constant_column",
+      message: `${field} has only one unique non-empty value.`,
+      affectedCount: presentValues.length
+    });
+  }
+  if (
+    presentValues.length >= MIN_IDENTIFIER_ROW_COUNT &&
+    uniqueCount / values.length >= LIKELY_IDENTIFIER_UNIQUE_RATIO
+  ) {
+    notes.push({
+      code: "likely_identifier",
+      message: `${field} is likely an identifier because most non-empty values are unique.`,
+      affectedCount: uniqueCount
     });
   }
 
@@ -374,14 +416,17 @@ function buildDatasetSummary(file: File, rows: Record<string, unknown>[]) {
 
   const columns = fields.map((field) => {
     const values = rows.map((row) => String(row[field] ?? ""));
-    const uniqueSamples = Array.from(
-      new Set(values.filter((value) => !isMissing(value)).slice(0, 10))
-    ).slice(0, 5);
+    const presentValues = values.filter((value) => !isMissing(value));
+    const uniqueSamples = Array.from(new Set(presentValues.slice(0, 10))).slice(
+      0,
+      5
+    );
 
     return {
       name: field,
       inferredType: inferColumnType(values),
       missingCount: values.filter(isMissing).length,
+      uniqueCount: new Set(presentValues).size,
       sampleValues: uniqueSamples,
       profilingNotes: buildProfilingNotes(field, values)
     };
