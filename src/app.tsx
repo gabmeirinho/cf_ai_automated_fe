@@ -28,6 +28,8 @@ type UploadState =
   | { status: "ready"; summary: DatasetSummary }
   | { status: "error"; message: string };
 
+const PREVIEW_VISIBLE_COLUMN_COUNT = 10;
+
 function getEffectivePreprocessingStep(
   step: PreprocessingStep,
   statuses: Record<string, PreprocessingStatus>
@@ -70,13 +72,25 @@ function PreviewTable({
   columns: { name: string }[];
   rows: Record<string, string | number | boolean | null>[];
 }) {
+  const previewWidthPercent =
+    (Math.max(columns.length, PREVIEW_VISIBLE_COLUMN_COUNT) /
+      PREVIEW_VISIBLE_COLUMN_COUNT) *
+    100;
+
   return (
-    <div className="overflow-auto border-t border-kumo-line">
-      <table className="min-w-full text-left text-xs">
+    <div className="w-full max-w-full overflow-x-auto border-t border-kumo-line">
+      <table
+        className="table-fixed text-left text-xs"
+        style={{ width: `${previewWidthPercent}%` }}
+      >
         <thead className="bg-kumo-base text-kumo-subtle">
           <tr>
             {columns.map((column) => (
-              <th key={column.name} className="px-3 py-2 font-medium">
+              <th
+                key={column.name}
+                className="truncate px-3 py-2 font-medium"
+                title={column.name}
+              >
                 {column.name}
               </th>
             ))}
@@ -88,7 +102,8 @@ function PreviewTable({
               {columns.map((column) => (
                 <td
                   key={column.name}
-                  className="max-w-52 truncate px-3 py-2 text-kumo-subtle"
+                  className="truncate px-3 py-2 text-kumo-subtle"
+                  title={renderPreviewValue(row[column.name])}
                 >
                   {renderPreviewValue(row[column.name])}
                 </td>
@@ -501,7 +516,7 @@ function DatasetWorkspace() {
               </table>
             </div>
 
-            <details className="rounded-lg border border-kumo-line bg-kumo-elevated">
+            <details className="min-w-0 overflow-hidden rounded-lg border border-kumo-line bg-kumo-elevated">
               <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-kumo-default">
                 Raw preview first {currentSummary.previewRows.length} rows
               </summary>
@@ -512,7 +527,7 @@ function DatasetWorkspace() {
             </details>
 
             {acceptedPreprocessingSteps.length > 0 && (
-              <details className="rounded-lg border border-kumo-line bg-kumo-elevated">
+              <details className="min-w-0 overflow-hidden rounded-lg border border-kumo-line bg-kumo-elevated">
                 <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-kumo-default">
                   Transformed preview first {transformedPreviewRows.length} rows
                 </summary>
