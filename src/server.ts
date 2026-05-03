@@ -143,6 +143,26 @@ function extractJsonObject(text: string) {
   return candidate.slice(start, end + 1);
 }
 
+function getJsonPayload(value: unknown): unknown {
+  if (
+    value &&
+    typeof value === "object" &&
+    "choices" in value &&
+    Array.isArray((value as { choices?: unknown }).choices)
+  ) {
+    const choice = (value as { choices: unknown[] }).choices[0];
+    if (choice && typeof choice === "object") {
+      const message = (choice as { message?: { content?: unknown } }).message;
+      if (typeof message?.content === "string") {
+        const nested = extractJsonObject(message.content);
+        if (nested) return JSON.parse(nested);
+      }
+    }
+  }
+
+  return value;
+}
+
 function roleForProfileColumn(
   column: ReviewProfile["columns"][number]
 ): PreprocessingPlan["assumptions"][number]["role"] {
@@ -186,6 +206,36 @@ function confidenceForProfileColumn(
   if (column.profilingNotes.length > 0 || column.inferredType === "mixed")
     return "medium";
   return "high";
+}
+
+function chooseFallbackTarget(profile: ReviewProfile) {
+  const columns = profile.columns.filter(
+    (column) => roleForProfileColumn(column) !== "identifier"
+  );
+  const nameMatched = columns.find((column) =>
+    /(target|label|outcome|churn|converted|conversion|survived|class|status|result|score|price|amount|total|sales|revenue)$/i.test(
+      column.name
+    )
+  );
+  if (nameMatched) return nameMatched.name;
+
+  const binaryColumn = columns.find(
+    (column) =>
+      column.uniqueCount === 2 &&
+      column.missingPercent < 10 &&
+      column.inferredType !== "empty"
+  );
+  if (binaryColumn) return binaryColumn.name;
+
+  const lastUsableColumn = [...columns]
+    .reverse()
+    .find(
+      (column) =>
+        column.inferredType !== "empty" &&
+        !column.profilingNotes.some((note) => note.code === "constant_column")
+    );
+
+  return lastUsableColumn?.name;
 }
 
 function buildDecisionTrace(
@@ -299,7 +349,23 @@ function normalizeLlmReview(
 }
 
 function buildFallbackPreprocessingPlan(profile: ReviewProfile) {
-  const assumptions = profile.columns.map(buildLocalAssumption);
+  const fallbackTarget = chooseFallbackTarget(profile);
+  const assumptions = profile.columns.map((column) => {
+    const assumption = buildLocalAssumption(column);
+    if (column.name !== fallbackTarget) return assumption;
+
+    return {
+      ...assumption,
+      role: "target" as const,
+      evidence: [
+        `Selected as a fallback target candidate from ${column.uniqueCount.toLocaleString()} unique value${column.uniqueCount === 1 ? "" : "s"}.`,
+        ...assumption.evidence
+      ].slice(0, 5),
+      recommendedActions: [
+        "Confirm this is the outcome column before accepting preprocessing."
+      ]
+    };
+  });
 
   return buildPreprocessingPlan(profile, {
     datasetSummary: `${profile.fileName} has ${profile.parsedRowCount.toLocaleString()} rows and ${profile.columnCount} columns.`,
@@ -325,7 +391,7 @@ function parseLlmReviewText(text: string) {
   }
 
   try {
-    const parsed = JSON.parse(jsonText);
+    const parsed = getJsonPayload(JSON.parse(jsonText));
     const validated = llmReviewSchema.safeParse(parsed);
 
     if (!validated.success) {

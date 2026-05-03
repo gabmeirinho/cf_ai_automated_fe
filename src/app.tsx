@@ -5,10 +5,8 @@ import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { ChatAgent } from "./server";
 import {
   MAX_CSV_SIZE_BYTES,
-  applyPreprocessingStepsToPreviewRows,
   buildAiReviewProfile,
   buildDatasetIntent,
-  describePreprocessingStep,
   formatBytes,
   parseCsvFile,
   renderPreviewValue,
@@ -17,12 +15,7 @@ import {
   type DatasetSummary,
   type ColumnAssumption,
   type LlmPreprocessingPlan,
-  type DatasetIntent,
-  type IntentOverride,
-  type ProfilingNoteCode,
-  type PreprocessingStep,
-  type PreprocessingStatus,
-  type TransformationDecision
+  type ProfilingNoteCode
 } from "./csv-profile";
 import {
   Badge,
@@ -93,6 +86,19 @@ type AiReviewState =
   | { status: "ready"; plan: LlmPreprocessingPlan }
   | { status: "error"; message: string };
 
+type ColumnPreparationAction = "feature" | "drop" | "review";
+
+type PreprocessingChoice =
+  | "none"
+  | "drop"
+  | "fill_mean"
+  | "fill_median"
+  | "fill_mode"
+  | "one_hot_encode"
+  | "trim_whitespace"
+  | "standardize_missing"
+  | "normalize_boolean";
+
 const COLUMN_FILTERS: Array<{
   key: ColumnFilter;
   label: string;
@@ -157,16 +163,6 @@ function filterColumn(column: ColumnSummary, filter: ColumnFilter) {
     case "likely_identifier":
       return hasProfilingNote(column, "likely_identifier");
   }
-}
-
-function getEffectivePreprocessingStep(
-  step: PreprocessingStep,
-  statuses: Record<string, PreprocessingStatus>
-) {
-  return {
-    ...step,
-    status: statuses[step.id] ?? step.status
-  } satisfies PreprocessingStep;
 }
 
 function ThemeToggle() {
@@ -893,34 +889,6 @@ When suggesting changes to assumptions, explain briefly and include an optional 
 Do not assume the patch has been applied until I confirm it.`;
 }
 
-function updateAssumptionStatus(
-  plan: LlmPreprocessingPlan,
-  assumptionId: string,
-  status: PreprocessingStatus
-) {
-  return {
-    ...plan,
-    assumptions: plan.assumptions.map((assumption) =>
-      assumption.id === assumptionId ? { ...assumption, status } : assumption
-    )
-  } satisfies LlmPreprocessingPlan;
-}
-
-function buildIntentOverride(
-  assumption: ColumnAssumption,
-  status: PreprocessingStatus
-) {
-  return {
-    assumptionId: assumption.id,
-    columnName: assumption.columnName,
-    role: assumption.role,
-    status,
-    source: "user",
-    reason: `User marked ${assumption.columnName} as ${status}.`,
-    updatedAt: new Date().toISOString()
-  } satisfies IntentOverride;
-}
-
 function assumptionRoleLabel(role: ColumnAssumption["role"]) {
   switch (role) {
     case "free_text":
@@ -940,124 +908,6 @@ function assumptionRoleLabel(role: ColumnAssumption["role"]) {
   }
 }
 
-function decisionTypeLabel(type: TransformationDecision["type"]) {
-  switch (type) {
-    case "assumption":
-      return "Assumption";
-    case "mapping":
-      return "Mapping";
-    case "normalization":
-      return "Normalization";
-    case "validation":
-      return "Validation";
-    case "exclusion":
-      return "Exclusion";
-  }
-}
-
-function DecisionTrace({ decisions }: { decisions: TransformationDecision[] }) {
-  if (decisions.length === 0) return null;
-
-  return (
-    <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
-      <div className="mb-3">
-        <Text size="xs" variant="secondary" bold>
-          Decision trace
-        </Text>
-        <Text size="xs" variant="secondary">
-          Inspect the model choices without exposing private reasoning.
-        </Text>
-      </div>
-      <div className="grid gap-2">
-        {decisions.map((decision) => (
-          <details
-            key={decision.id}
-            className="rounded-lg border border-kumo-line bg-kumo-elevated"
-          >
-            <summary className="flex cursor-pointer flex-wrap items-center gap-2 px-3 py-2">
-              <Badge variant="secondary">
-                {decisionTypeLabel(decision.type)}
-              </Badge>
-              <Text size="sm" bold>
-                {decision.target}
-              </Text>
-              <Badge
-                variant={
-                  decision.confidence === "high" ? "primary" : "secondary"
-                }
-              >
-                {decision.confidence}
-              </Badge>
-            </summary>
-            <div className="grid gap-3 border-t border-kumo-line px-3 py-3">
-              <div>
-                <Text size="xs" variant="secondary" bold>
-                  Choice
-                </Text>
-                <Text size="sm">{decision.decision}</Text>
-              </div>
-              <div>
-                <Text size="xs" variant="secondary" bold>
-                  Reason
-                </Text>
-                <Text size="sm">{decision.reason}</Text>
-              </div>
-              {(decision.evidence.length > 0 ||
-                decision.alternatives.length > 0) && (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  {decision.evidence.length > 0 && (
-                    <div>
-                      <Text size="xs" variant="secondary" bold>
-                        Evidence
-                      </Text>
-                      <ul className="mt-1 grid gap-1">
-                        {decision.evidence.map((item) => (
-                          <li key={item} className="text-xs text-kumo-subtle">
-                            {item}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                  {decision.alternatives.length > 0 && (
-                    <div>
-                      <Text size="xs" variant="secondary" bold>
-                        Alternatives
-                      </Text>
-                      <ul className="mt-1 grid gap-1">
-                        {decision.alternatives.map((item) => (
-                          <li key={item} className="text-xs text-kumo-subtle">
-                            {item}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
-                  )}
-                </div>
-              )}
-              {(decision.relatedAssumptionIds.length > 0 ||
-                decision.relatedPreprocessingStepIds.length > 0) && (
-                <div className="flex flex-wrap gap-2">
-                  {decision.relatedAssumptionIds.map((id) => (
-                    <Badge key={`assumption-${id}`} variant="secondary">
-                      {id}
-                    </Badge>
-                  ))}
-                  {decision.relatedPreprocessingStepIds.map((id) => (
-                    <Badge key={`step-${id}`} variant="secondary">
-                      {id}
-                    </Badge>
-                  ))}
-                </div>
-              )}
-            </div>
-          </details>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 function ColumnList({ label, columns }: { label: string; columns: string[] }) {
   return (
     <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
@@ -1071,338 +921,596 @@ function ColumnList({ label, columns }: { label: string; columns: string[] }) {
   );
 }
 
-function DatasetIntentPanel({ intent }: { intent: DatasetIntent }) {
-  return (
-    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-      <div className="mb-3">
-        <Text size="sm" bold>
-          Dataset intent
-        </Text>
-        <Text size="xs" variant="secondary">
-          Accepted assumptions become the canonical state used by downstream
-          planning.
-        </Text>
-      </div>
-
-      <div className="grid gap-2 sm:grid-cols-3">
-        <ColumnList
-          label="Target"
-          columns={intent.targetColumn ? [intent.targetColumn] : []}
-        />
-        <ColumnList label="Features" columns={intent.featureColumns} />
-        <ColumnList label="Ignored" columns={intent.ignoredColumns} />
-        <ColumnList label="Identifiers" columns={intent.identifierColumns} />
-        <ColumnList label="Timestamps" columns={intent.timestampColumns} />
-        <ColumnList label="Text" columns={intent.textColumns} />
-      </div>
-
-      {(intent.conflicts.length > 0 || intent.warnings.length > 0) && (
-        <div className="mt-3 grid gap-2">
-          {intent.conflicts.length > 0 && (
-            <div className="rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 p-3">
-              <Text size="xs" bold>
-                Conflicts
-              </Text>
-              <ul className="mt-2 grid gap-1">
-                {intent.conflicts.map((conflict) => (
-                  <li key={conflict} className="text-xs text-kumo-subtle">
-                    {conflict}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-          {intent.warnings.length > 0 && (
-            <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 p-3">
-              <Text size="xs" bold>
-                Intent warnings
-              </Text>
-              <ul className="mt-2 grid gap-1">
-                {intent.warnings.map((warning) => (
-                  <li key={warning} className="text-xs text-kumo-subtle">
-                    {warning}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+function getAssumptionForColumn(
+  plan: LlmPreprocessingPlan | null,
+  columnName: string
+) {
+  return plan?.assumptions.find(
+    (assumption) => assumption.columnName === columnName
   );
 }
 
-function AiReviewPanel({
+function getSuggestedTarget(plan: LlmPreprocessingPlan | null) {
+  return (
+    plan?.assumptions.find((assumption) => assumption.role === "target") ?? null
+  );
+}
+
+function getColumnPreparationAction(
+  column: ColumnSummary,
+  assumption: ColumnAssumption | undefined,
+  targetColumn: string | null
+): ColumnPreparationAction {
+  if (column.name === targetColumn) return "review";
+  if (
+    assumption?.role === "identifier" ||
+    assumption?.role === "ignore" ||
+    hasProfilingNote(column, "empty_column") ||
+    hasProfilingNote(column, "constant_column")
+  ) {
+    return "drop";
+  }
+  if (assumption?.role === "unknown" || assumption?.role === "free_text") {
+    return "review";
+  }
+  return "feature";
+}
+
+function columnActionLabel(action: ColumnPreparationAction) {
+  switch (action) {
+    case "feature":
+      return "Use";
+    case "drop":
+      return "Drop";
+    case "review":
+      return "Review";
+  }
+}
+
+function preprocessingChoiceLabel(choice: PreprocessingChoice) {
+  switch (choice) {
+    case "none":
+      return "No step";
+    case "drop":
+      return "Drop column";
+    case "fill_mean":
+      return "Fill mean";
+    case "fill_median":
+      return "Fill median";
+    case "fill_mode":
+      return "Fill mode";
+    case "one_hot_encode":
+      return "One-hot encode";
+    case "trim_whitespace":
+      return "Trim whitespace";
+    case "standardize_missing":
+      return "Standardize missing";
+    case "normalize_boolean":
+      return "Normalize boolean";
+  }
+}
+
+function getSuggestedPreprocessingChoice(
+  column: ColumnSummary,
+  assumption: ColumnAssumption | undefined,
+  targetColumn: string | null
+): { choice: PreprocessingChoice; reason: string } {
+  const missingPercent =
+    column.nonMissingCount + column.missingCount === 0
+      ? 0
+      : column.missingCount / (column.nonMissingCount + column.missingCount);
+
+  if (column.name === targetColumn) {
+    return {
+      choice: "none",
+      reason: "Target column is kept separate from feature preprocessing."
+    };
+  }
+  if (
+    assumption?.role === "identifier" ||
+    assumption?.role === "ignore" ||
+    hasProfilingNote(column, "empty_column") ||
+    hasProfilingNote(column, "constant_column")
+  ) {
+    return {
+      choice: "drop",
+      reason:
+        assumption?.evidence[0] ??
+        "The column is unlikely to add useful feature signal."
+    };
+  }
+  if (hasProfilingNote(column, "missing_like_tokens")) {
+    return {
+      choice: "standardize_missing",
+      reason: "The profiler found tokens that commonly mean missing values."
+    };
+  }
+  if (hasProfilingNote(column, "leading_trailing_whitespace")) {
+    return {
+      choice: "trim_whitespace",
+      reason: "Sampled values contain leading or trailing whitespace."
+    };
+  }
+  if (column.inferredType === "boolean") {
+    return {
+      choice: "normalize_boolean",
+      reason: "Boolean-like values should use one consistent representation."
+    };
+  }
+  if (missingPercent > 0 && column.inferredType === "number") {
+    return {
+      choice: missingPercent >= 0.2 ? "fill_median" : "fill_mean",
+      reason:
+        missingPercent >= 0.2
+          ? "Numeric missingness is material; median is robust to skew."
+          : "Numeric missingness is low; mean imputation is a simple baseline."
+    };
+  }
+  if (missingPercent > 0 && column.inferredType === "string") {
+    return {
+      choice: "fill_mode",
+      reason: "Categorical missing values can use the most frequent value."
+    };
+  }
+  if (
+    column.inferredType === "string" &&
+    column.uniqueCount > 1 &&
+    column.uniqueRatio <= 0.2
+  ) {
+    return {
+      choice: "one_hot_encode",
+      reason: "Low-cardinality categorical values are suitable for encoding."
+    };
+  }
+  return {
+    choice: "none",
+    reason: assumption?.recommendedActions[0] ?? "No required cleanup detected."
+  };
+}
+
+function SelectBox({
+  value,
+  onChange,
+  children,
+  ariaLabel
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  children: React.ReactNode;
+  ariaLabel: string;
+}) {
+  return (
+    <select
+      value={value}
+      aria-label={ariaLabel}
+      className="h-8 rounded-md border border-kumo-line bg-kumo-base px-2 text-sm text-kumo-default outline-none focus:ring-2 focus:ring-kumo-ring"
+      onChange={(event) => onChange(event.target.value)}
+    >
+      {children}
+    </select>
+  );
+}
+
+function PreparationReviewPanel({
   summary,
   reviewState,
+  targetColumn,
+  columnActions,
+  preprocessingChoices,
   onGenerate,
-  onUpdateAssumption,
+  onAcceptTarget,
+  onTargetChange,
+  onColumnActionChange,
+  onPreprocessingChoiceChange,
+  onApplySuggestedPreprocessing,
   onSendToChat
 }: {
   summary: DatasetSummary;
   reviewState: AiReviewState;
+  targetColumn: string | null;
+  columnActions: Record<string, ColumnPreparationAction>;
+  preprocessingChoices: Record<string, PreprocessingChoice>;
   onGenerate: () => void;
-  onUpdateAssumption: (
-    assumptionId: string,
-    status: PreprocessingStatus
+  onAcceptTarget: (columnName: string) => void;
+  onTargetChange: (columnName: string) => void;
+  onColumnActionChange: (
+    columnName: string,
+    action: ColumnPreparationAction
   ) => void;
+  onPreprocessingChoiceChange: (
+    columnName: string,
+    choice: PreprocessingChoice
+  ) => void;
+  onApplySuggestedPreprocessing: () => void;
   onSendToChat: () => void;
 }) {
   const plan = reviewState.status === "ready" ? reviewState.plan : null;
-  const groupedAssumptions = useMemo(() => {
-    const groups = new Map<ColumnAssumption["role"], ColumnAssumption[]>();
+  const suggestedTarget = getSuggestedTarget(plan);
+  const selectedTarget = targetColumn ?? suggestedTarget?.columnName ?? "";
+  const targetEvidence = suggestedTarget?.evidence.join(" ") || "";
+  const preparedColumns = summary.columns.map((column) => {
+    const assumption = getAssumptionForColumn(plan, column.name);
+    const suggestedAction = getColumnPreparationAction(
+      column,
+      assumption,
+      targetColumn
+    );
+    const selectedAction = columnActions[column.name] ?? suggestedAction;
+    const suggestedPreprocessing = getSuggestedPreprocessingChoice(
+      column,
+      assumption,
+      targetColumn
+    );
+    const selectedPreprocessing =
+      preprocessingChoices[column.name] ?? suggestedPreprocessing.choice;
 
-    for (const assumption of plan?.assumptions ?? []) {
-      const current = groups.get(assumption.role) ?? [];
-      current.push(assumption);
-      groups.set(assumption.role, current);
-    }
-
-    const order: ColumnAssumption["role"][] = [
-      "target",
-      "identifier",
-      "timestamp",
-      "free_text",
-      "ignore",
-      "feature",
-      "unknown"
-    ];
-
-    return order
-      .map((role) => [role, groups.get(role) ?? []] as const)
-      .filter(([, assumptions]) => assumptions.length > 0);
-  }, [plan]);
-  const acceptedCount =
-    plan?.assumptions.filter((assumption) => assumption.status === "accepted")
-      .length ?? 0;
-  const rejectedCount =
-    plan?.assumptions.filter((assumption) => assumption.status === "rejected")
-      .length ?? 0;
+    return {
+      column,
+      assumption,
+      suggestedAction,
+      selectedAction,
+      suggestedPreprocessing,
+      selectedPreprocessing
+    };
+  });
+  const featureColumns = preparedColumns.filter(
+    (item) => item.selectedAction === "feature"
+  );
+  const droppedColumns = preparedColumns.filter(
+    (item) => item.selectedAction === "drop"
+  );
+  const activePreprocessing = preparedColumns.filter(
+    (item) => item.selectedPreprocessing !== "none"
+  );
 
   return (
-    <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <MagnifyingGlassIcon size={16} />
-            <Text size="sm" bold>
-              AI dataset review
+    <div className="grid gap-4">
+      <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <MagnifyingGlassIcon size={16} />
+              <Text size="sm" bold>
+                Target variable
+              </Text>
+            </div>
+            <Text size="xs" variant="secondary">
+              {plan
+                ? plan.datasetSummary
+                : "Generate a proposal from the dataset profile."}
             </Text>
           </div>
-          <Text size="xs" variant="secondary">
-            Sends profile statistics, samples, and preview rows only.
-          </Text>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {plan && (
+          <div className="flex flex-wrap gap-2">
+            {plan && (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                icon={<ChatCircleDotsIcon size={14} />}
+                onClick={onSendToChat}
+              >
+                Discuss
+              </Button>
+            )}
             <Button
               type="button"
-              variant="secondary"
+              variant="primary"
               size="sm"
-              icon={<ChatCircleDotsIcon size={14} />}
-              onClick={onSendToChat}
+              icon={<MagnifyingGlassIcon size={14} />}
+              disabled={reviewState.status === "loading"}
+              onClick={onGenerate}
             >
-              Discuss
+              {reviewState.status === "loading" ? "Reviewing" : "Suggest plan"}
             </Button>
-          )}
-          <Button
-            type="button"
-            variant="primary"
-            size="sm"
-            icon={<MagnifyingGlassIcon size={14} />}
-            disabled={reviewState.status === "loading"}
-            onClick={onGenerate}
-          >
-            {reviewState.status === "loading" ? "Reviewing" : "Generate review"}
-          </Button>
+          </div>
         </div>
+
+        {reviewState.status === "error" && (
+          <div className="mt-3 rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 px-3 py-2">
+            <Text size="sm">{reviewState.message}</Text>
+          </div>
+        )}
+
+        {plan && (
+          <div className="mt-3 grid gap-3 rounded-lg border border-kumo-line bg-kumo-base p-3">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <Text size="xs" variant="secondary">
+                  Suggested target
+                </Text>
+                <div className="mt-1 flex flex-wrap items-center gap-2">
+                  <Text size="lg" bold>
+                    {suggestedTarget?.columnName ?? "No target suggested"}
+                  </Text>
+                  {suggestedTarget && (
+                    <Badge
+                      variant={
+                        suggestedTarget.confidence === "high"
+                          ? "primary"
+                          : "secondary"
+                      }
+                    >
+                      {suggestedTarget.confidence}
+                    </Badge>
+                  )}
+                </div>
+                {targetEvidence && (
+                  <Text size="xs" variant="secondary">
+                    {targetEvidence}
+                  </Text>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <Button
+                  type="button"
+                  variant="primary"
+                  size="sm"
+                  disabled={!suggestedTarget}
+                  onClick={() => {
+                    if (suggestedTarget)
+                      onAcceptTarget(suggestedTarget.columnName);
+                  }}
+                >
+                  Accept
+                </Button>
+                <SelectBox
+                  value={selectedTarget}
+                  ariaLabel="Choose target column"
+                  onChange={onTargetChange}
+                >
+                  <option value="">Choose target</option>
+                  {summary.columns.map((column) => (
+                    <option key={column.name} value={column.name}>
+                      {column.name}
+                    </option>
+                  ))}
+                </SelectBox>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
-      {reviewState.status === "idle" && (
-        <div className="mt-3 rounded-lg border border-dashed border-kumo-line bg-kumo-base px-3 py-4">
-          <Text size="xs" variant="secondary">
-            Generate a structured review for {summary.columns.length} columns
-            before accepting preprocessing assumptions.
-          </Text>
-        </div>
-      )}
-
-      {reviewState.status === "error" && (
-        <div className="mt-3 rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 px-3 py-2">
-          <Text size="sm">{reviewState.message}</Text>
-        </div>
-      )}
-
       {plan && (
-        <div className="mt-3 grid gap-3">
-          <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
-            <Text size="sm" bold>
-              {plan.datasetSummary}
-            </Text>
-            <div className="mt-2 flex flex-wrap gap-2">
-              <Badge variant="secondary">
-                {plan.assumptions.length} assumptions
-              </Badge>
-              <Badge variant="secondary">
-                {plan.decisions.length} decisions
-              </Badge>
-              <Badge variant="secondary">{acceptedCount} accepted</Badge>
-              <Badge variant="secondary">{rejectedCount} rejected</Badge>
+        <>
+          <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
+            <div className="flex flex-col gap-2 border-b border-kumo-line p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <Text size="sm" bold>
+                  Column proposals
+                </Text>
+                <Text size="xs" variant="secondary">
+                  {featureColumns.length} used, {droppedColumns.length} dropped
+                </Text>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                {plan.globalWarnings.map((warning) => (
+                  <Badge key={warning} variant="secondary">
+                    {warning}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+            <div className="overflow-auto">
+              <table className="min-w-full text-left text-sm">
+                <thead className="bg-kumo-base text-kumo-subtle">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Column</th>
+                    <th className="px-3 py-2 font-medium">Suggestion</th>
+                    <th className="px-3 py-2 font-medium">Reason</th>
+                    <th className="px-3 py-2 font-medium">Decision</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-kumo-line">
+                  {preparedColumns.map(
+                    ({
+                      column,
+                      assumption,
+                      suggestedAction,
+                      selectedAction
+                    }) => (
+                      <tr key={column.name}>
+                        <td className="px-3 py-2">
+                          <div className="grid gap-1">
+                            <Text size="sm" bold>
+                              {column.name}
+                            </Text>
+                            <Text size="xs" variant="secondary">
+                              {column.inferredType} ·{" "}
+                              {formatPercent(
+                                getMissingPercent(
+                                  column,
+                                  summary.parsedRowCount
+                                )
+                              )}{" "}
+                              missing
+                            </Text>
+                          </div>
+                        </td>
+                        <td className="px-3 py-2">
+                          <div className="flex flex-wrap gap-2">
+                            <Badge
+                              variant={
+                                suggestedAction === "drop"
+                                  ? "secondary"
+                                  : "primary"
+                              }
+                            >
+                              {columnActionLabel(suggestedAction)}
+                            </Badge>
+                            {assumption && (
+                              <Badge variant="secondary">
+                                {assumptionRoleLabel(assumption.role)}
+                              </Badge>
+                            )}
+                          </div>
+                        </td>
+                        <td className="max-w-md px-3 py-2 text-kumo-subtle">
+                          {assumption?.evidence[0] ??
+                            column.profilingNotes[0]?.message ??
+                            "No strong signal found."}
+                        </td>
+                        <td className="px-3 py-2">
+                          <SelectBox
+                            value={selectedAction}
+                            ariaLabel={`Set role for ${column.name}`}
+                            onChange={(value) =>
+                              onColumnActionChange(
+                                column.name,
+                                value as ColumnPreparationAction
+                              )
+                            }
+                          >
+                            <option value="feature">Use</option>
+                            <option value="drop">Drop</option>
+                            <option value="review">Review</option>
+                          </SelectBox>
+                        </td>
+                      </tr>
+                    )
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
 
-          <DecisionTrace decisions={plan.decisions} />
-
-          {plan.globalWarnings.length > 0 && (
-            <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 p-3">
-              <Text size="xs" bold>
-                Global warnings
-              </Text>
-              <ul className="mt-2 grid gap-1">
-                {plan.globalWarnings.map((warning) => (
-                  <li key={warning} className="text-xs text-kumo-subtle">
-                    {warning}
-                  </li>
-                ))}
-              </ul>
+          <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
+            <div className="flex flex-col gap-2 border-b border-kumo-line p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <Text size="sm" bold>
+                  Preprocessing proposals
+                </Text>
+                <Text size="xs" variant="secondary">
+                  {activePreprocessing.length} active steps
+                </Text>
+              </div>
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                icon={<MagnifyingGlassIcon size={14} />}
+                onClick={onApplySuggestedPreprocessing}
+              >
+                Use suggestions
+              </Button>
             </div>
-          )}
-
-          {groupedAssumptions.map(([role, assumptions]) => (
-            <div key={role} className="grid gap-2">
-              <Text size="xs" variant="secondary" bold>
-                {assumptionRoleLabel(role)}
-              </Text>
-              {assumptions.map((assumption) => (
-                <div
-                  key={assumption.id}
-                  className={`rounded-lg border p-3 ${
-                    assumption.status === "accepted"
-                      ? "border-kumo-brand bg-kumo-brand/5"
-                      : assumption.status === "rejected"
-                        ? "border-kumo-line bg-kumo-base opacity-70"
-                        : "border-kumo-line bg-kumo-base"
-                  }`}
-                >
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Text size="sm" bold>
-                          {assumption.columnName}
-                        </Text>
-                        <Badge variant="secondary">
-                          {assumption.semanticType}
-                        </Badge>
-                        <Badge
-                          variant={
-                            assumption.confidence === "high"
-                              ? "primary"
-                              : "secondary"
-                          }
-                        >
-                          {assumption.confidence}
-                        </Badge>
-                        <Badge
-                          variant={
-                            assumption.status === "accepted"
-                              ? "primary"
-                              : "secondary"
-                          }
-                        >
-                          {assumption.status}
-                        </Badge>
-                      </div>
-                      {assumption.evidence.length > 0 && (
-                        <Text size="xs" variant="secondary">
-                          {assumption.evidence.join(" ")}
-                        </Text>
-                      )}
-                    </div>
-                    <div className="flex gap-2">
-                      <Button
-                        type="button"
-                        variant="primary"
-                        size="sm"
-                        disabled={assumption.status === "accepted"}
-                        onClick={() =>
-                          onUpdateAssumption(assumption.id, "accepted")
-                        }
-                      >
-                        Accept
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        size="sm"
-                        disabled={assumption.status === "rejected"}
-                        onClick={() =>
-                          onUpdateAssumption(assumption.id, "rejected")
-                        }
-                      >
-                        Reject
-                      </Button>
-                    </div>
-                  </div>
-
-                  {(assumption.risks.length > 0 ||
-                    assumption.recommendedActions.length > 0) && (
-                    <div className="mt-3 grid gap-2 sm:grid-cols-2">
-                      {assumption.risks.length > 0 && (
-                        <div>
-                          <Text size="xs" variant="secondary" bold>
-                            Risks
-                          </Text>
-                          <ul className="mt-1 grid gap-1">
-                            {assumption.risks.map((risk) => (
-                              <li
-                                key={risk}
-                                className="text-xs text-kumo-subtle"
-                              >
-                                {risk}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                      {assumption.recommendedActions.length > 0 && (
-                        <div>
-                          <Text size="xs" variant="secondary" bold>
-                            Actions
-                          </Text>
-                          <ul className="mt-1 grid gap-1">
-                            {assumption.recommendedActions.map((action) => (
-                              <li
-                                key={action}
-                                className="text-xs text-kumo-subtle"
-                              >
-                                {action}
-                              </li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
+            <div className="overflow-auto">
+              <table className="min-w-full text-left text-sm">
+                <thead className="bg-kumo-base text-kumo-subtle">
+                  <tr>
+                    <th className="px-3 py-2 font-medium">Column</th>
+                    <th className="px-3 py-2 font-medium">Suggested step</th>
+                    <th className="px-3 py-2 font-medium">Reason</th>
+                    <th className="px-3 py-2 font-medium">Decision</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-kumo-line">
+                  {preparedColumns.map(
+                    ({
+                      column,
+                      suggestedPreprocessing,
+                      selectedPreprocessing
+                    }) => (
+                      <tr key={column.name}>
+                        <td className="px-3 py-2 font-medium text-kumo-default">
+                          {column.name}
+                        </td>
+                        <td className="px-3 py-2">
+                          <Badge
+                            variant={
+                              suggestedPreprocessing.choice === "none"
+                                ? "secondary"
+                                : "primary"
+                            }
+                          >
+                            {preprocessingChoiceLabel(
+                              suggestedPreprocessing.choice
+                            )}
+                          </Badge>
+                        </td>
+                        <td className="max-w-md px-3 py-2 text-kumo-subtle">
+                          {suggestedPreprocessing.reason}
+                        </td>
+                        <td className="px-3 py-2">
+                          <SelectBox
+                            value={selectedPreprocessing}
+                            ariaLabel={`Set preprocessing for ${column.name}`}
+                            onChange={(value) =>
+                              onPreprocessingChoiceChange(
+                                column.name,
+                                value as PreprocessingChoice
+                              )
+                            }
+                          >
+                            <option value="none">No step</option>
+                            <option value="drop">Drop column</option>
+                            <option value="fill_mean">Fill mean</option>
+                            <option value="fill_median">Fill median</option>
+                            <option value="fill_mode">Fill mode</option>
+                            <option value="one_hot_encode">
+                              One-hot encode
+                            </option>
+                            <option value="trim_whitespace">
+                              Trim whitespace
+                            </option>
+                            <option value="standardize_missing">
+                              Standardize missing
+                            </option>
+                            <option value="normalize_boolean">
+                              Normalize boolean
+                            </option>
+                          </SelectBox>
+                        </td>
+                      </tr>
+                    )
                   )}
-                </div>
-              ))}
+                </tbody>
+              </table>
             </div>
-          ))}
+          </div>
 
-          {plan.nextQuestions.length > 0 && (
-            <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
-              <Text size="xs" variant="secondary" bold>
-                Next questions
-              </Text>
-              <ul className="mt-2 grid gap-1">
-                {plan.nextQuestions.map((question) => (
-                  <li key={question} className="text-xs text-kumo-subtle">
-                    {question}
-                  </li>
-                ))}
-              </ul>
+          <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
+            <Text size="sm" bold>
+              Final preparation plan
+            </Text>
+            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+              <ColumnList
+                label="Target"
+                columns={targetColumn ? [targetColumn] : []}
+              />
+              <ColumnList
+                label="Features"
+                columns={featureColumns.map((item) => item.column.name)}
+              />
+              <ColumnList
+                label="Dropped"
+                columns={droppedColumns.map((item) => item.column.name)}
+              />
             </div>
-          )}
-        </div>
+            <div className="mt-3 rounded-lg border border-kumo-line bg-kumo-base p-3">
+              <Text size="xs" variant="secondary">
+                Preprocessing
+              </Text>
+              {activePreprocessing.length > 0 ? (
+                <ul className="mt-2 grid gap-1">
+                  {activePreprocessing.map((item) => (
+                    <li
+                      key={item.column.name}
+                      className="text-xs text-kumo-subtle"
+                    >
+                      {item.column.name}:{" "}
+                      {preprocessingChoiceLabel(item.selectedPreprocessing)}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <Text size="sm" bold>
+                  None
+                </Text>
+              )}
+            </div>
+          </div>
+        </>
       )}
     </div>
   );
@@ -1447,9 +1555,6 @@ function DatasetWorkspace() {
   const [uploadState, setUploadState] = useState<UploadState>({
     status: "idle"
   });
-  const [preprocessingStatuses, setPreprocessingStatuses] = useState<
-    Record<string, PreprocessingStatus>
-  >({});
   const [columnFilter, setColumnFilter] = useState<ColumnFilter>("all");
   const [columnSort, setColumnSort] = useState<ColumnSort>({
     key: "notesCount",
@@ -1458,25 +1563,16 @@ function DatasetWorkspace() {
   const [aiReviewState, setAiReviewState] = useState<AiReviewState>({
     status: "idle"
   });
-  const [intentOverrides, setIntentOverrides] = useState<IntentOverride[]>([]);
+  const [targetColumn, setTargetColumn] = useState<string | null>(null);
+  const [columnActions, setColumnActions] = useState<
+    Record<string, ColumnPreparationAction>
+  >({});
+  const [preprocessingChoices, setPreprocessingChoices] = useState<
+    Record<string, PreprocessingChoice>
+  >({});
 
   const currentSummary =
     uploadState.status === "ready" ? uploadState.summary : null;
-  const proposedPreprocessingSteps =
-    currentSummary?.proposedPreprocessingSteps ?? [];
-  const effectivePreprocessingSteps = proposedPreprocessingSteps.map((step) =>
-    getEffectivePreprocessingStep(step, preprocessingStatuses)
-  );
-  const acceptedPreprocessingSteps = effectivePreprocessingSteps.filter(
-    (step) => step.status === "accepted"
-  );
-  const transformedPreviewRows =
-    currentSummary && acceptedPreprocessingSteps.length > 0
-      ? applyPreprocessingStepsToPreviewRows(
-          currentSummary.previewRows,
-          acceptedPreprocessingSteps
-        )
-      : [];
   const columnQualityCounts = useMemo(() => {
     const columns = currentSummary?.columns ?? [];
 
@@ -1539,24 +1635,6 @@ function DatasetWorkspace() {
         return left.name.localeCompare(right.name);
       });
   }, [columnFilter, columnSort, currentSummary]);
-  const datasetIntent = useMemo(() => {
-    if (!currentSummary || aiReviewState.status !== "ready") return null;
-    return buildDatasetIntent(
-      currentSummary,
-      aiReviewState.plan.assumptions,
-      intentOverrides
-    );
-  }, [aiReviewState, currentSummary, intentOverrides]);
-
-  const updatePreprocessingStatus = useCallback(
-    (stepId: string, status: PreprocessingStatus) => {
-      setPreprocessingStatuses((current) => ({
-        ...current,
-        [stepId]: status
-      }));
-    },
-    []
-  );
   const updateColumnSort = useCallback((key: ColumnSortKey) => {
     setColumnSort((current) => ({
       key,
@@ -1567,9 +1645,10 @@ function DatasetWorkspace() {
 
   const resetWorkspace = useCallback(() => {
     setUploadState({ status: "idle" });
-    setPreprocessingStatuses({});
     setAiReviewState({ status: "idle" });
-    setIntentOverrides([]);
+    setTargetColumn(null);
+    setColumnActions({});
+    setPreprocessingChoices({});
     setColumnFilter("all");
     setColumnSort({ key: "notesCount", direction: "desc" });
     if (csvInputRef.current) csvInputRef.current.value = "";
@@ -1596,14 +1675,39 @@ function DatasetWorkspace() {
         );
       }
 
+      const reviewPlan = data as LlmPreprocessingPlan;
+      const suggestedTarget =
+        getSuggestedTarget(reviewPlan)?.columnName ?? null;
+      const nextColumnActions = Object.fromEntries(
+        currentSummary.columns.map((column) => {
+          const assumption = getAssumptionForColumn(reviewPlan, column.name);
+          return [
+            column.name,
+            getColumnPreparationAction(column, assumption, suggestedTarget)
+          ];
+        })
+      );
+      const nextPreprocessingChoices = Object.fromEntries(
+        currentSummary.columns.map((column) => {
+          const assumption = getAssumptionForColumn(reviewPlan, column.name);
+          return [
+            column.name,
+            getSuggestedPreprocessingChoice(column, assumption, suggestedTarget)
+              .choice
+          ];
+        })
+      );
+
       setAiReviewState({
         status: "ready",
-        plan: data as LlmPreprocessingPlan
+        plan: reviewPlan
       });
-      setIntentOverrides([]);
+      setTargetColumn(suggestedTarget);
+      setColumnActions(nextColumnActions);
+      setPreprocessingChoices(nextPreprocessingChoices);
       toasts.add({
         title: "AI review generated",
-        description: "Review the proposed assumptions before using them."
+        description: "Confirm the target and preprocessing proposals."
       });
     } catch (error) {
       setAiReviewState({
@@ -1615,30 +1719,6 @@ function DatasetWorkspace() {
       });
     }
   }, [currentSummary, toasts]);
-
-  const updateAiAssumptionStatus = useCallback(
-    (assumptionId: string, status: PreprocessingStatus) => {
-      setAiReviewState((current) => {
-        if (current.status !== "ready") return current;
-        const assumption = current.plan.assumptions.find(
-          (item) => item.id === assumptionId
-        );
-        if (assumption) {
-          setIntentOverrides((overrides) => [
-            ...overrides.filter(
-              (override) => override.assumptionId !== assumptionId
-            ),
-            buildIntentOverride(assumption, status)
-          ]);
-        }
-        return {
-          status: "ready",
-          plan: updateAssumptionStatus(current.plan, assumptionId, status)
-        };
-      });
-    },
-    []
-  );
 
   const sendAiReviewToChat = useCallback(() => {
     if (!currentSummary || aiReviewState.status !== "ready") return;
@@ -1656,6 +1736,81 @@ function DatasetWorkspace() {
     });
   }, [aiReviewState, currentSummary, toasts]);
 
+  const acceptTarget = useCallback((columnName: string) => {
+    setTargetColumn(columnName);
+    setColumnActions((current) => ({
+      ...current,
+      [columnName]: "review"
+    }));
+    setPreprocessingChoices((current) => ({
+      ...current,
+      [columnName]: "none"
+    }));
+  }, []);
+
+  const changeTarget = useCallback((columnName: string) => {
+    setTargetColumn(columnName || null);
+    if (!columnName) return;
+    setColumnActions((current) => ({
+      ...current,
+      [columnName]: "review"
+    }));
+    setPreprocessingChoices((current) => ({
+      ...current,
+      [columnName]: "none"
+    }));
+  }, []);
+
+  const changeColumnAction = useCallback(
+    (columnName: string, action: ColumnPreparationAction) => {
+      setColumnActions((current) => ({
+        ...current,
+        [columnName]: action
+      }));
+      if (action === "drop") {
+        setPreprocessingChoices((current) => ({
+          ...current,
+          [columnName]: "drop"
+        }));
+      }
+    },
+    []
+  );
+
+  const changePreprocessingChoice = useCallback(
+    (columnName: string, choice: PreprocessingChoice) => {
+      setPreprocessingChoices((current) => ({
+        ...current,
+        [columnName]: choice
+      }));
+      if (choice === "drop") {
+        setColumnActions((current) => ({
+          ...current,
+          [columnName]: "drop"
+        }));
+      }
+    },
+    []
+  );
+
+  const applySuggestedPreprocessing = useCallback(() => {
+    if (!currentSummary || aiReviewState.status !== "ready") return;
+    const plan = aiReviewState.plan;
+
+    setPreprocessingChoices(
+      Object.fromEntries(
+        currentSummary.columns.map((column) => {
+          const assumption = getAssumptionForColumn(plan, column.name);
+          return [
+            column.name,
+            getSuggestedPreprocessingChoice(column, assumption, targetColumn)
+              .choice
+          ];
+        })
+      )
+    );
+  }, [aiReviewState, currentSummary, targetColumn]);
+
   const handleCsvFile = useCallback(
     async (file: File) => {
       if (uploadState.status === "ready") {
@@ -1663,9 +1818,10 @@ function DatasetWorkspace() {
           "Uploading a new CSV will replace the active dataset and preprocessing pipeline."
         );
         if (!replace) return;
-        setPreprocessingStatuses({});
         setAiReviewState({ status: "idle" });
-        setIntentOverrides([]);
+        setTargetColumn(null);
+        setColumnActions({});
+        setPreprocessingChoices({});
       }
 
       setUploadState({ status: "validating", fileName: file.name });
@@ -1679,9 +1835,10 @@ function DatasetWorkspace() {
       try {
         const summary = await parseCsvFile(file);
         setUploadState({ status: "ready", summary });
-        setPreprocessingStatuses({});
         setAiReviewState({ status: "idle" });
-        setIntentOverrides([]);
+        setTargetColumn(null);
+        setColumnActions({});
+        setPreprocessingChoices({});
         toasts.add({
           title: "CSV parsed",
           description: `${summary.parsedRowCount.toLocaleString()} rows, ${summary.columns.length} columns`
@@ -1859,124 +2016,32 @@ function DatasetWorkspace() {
               </div>
             )}
 
-            <AiReviewPanel
+            <div className="min-w-0 overflow-hidden rounded-lg border border-kumo-line bg-kumo-elevated">
+              <div className="border-b border-kumo-line px-3 py-2">
+                <Text size="sm" bold>
+                  Data preview
+                </Text>
+              </div>
+              <PreviewTable
+                columns={currentSummary.columns}
+                rows={currentSummary.previewRows}
+              />
+            </div>
+
+            <PreparationReviewPanel
               summary={currentSummary}
               reviewState={aiReviewState}
+              targetColumn={targetColumn}
+              columnActions={columnActions}
+              preprocessingChoices={preprocessingChoices}
               onGenerate={() => void generateAiReview()}
-              onUpdateAssumption={updateAiAssumptionStatus}
+              onAcceptTarget={acceptTarget}
+              onTargetChange={changeTarget}
+              onColumnActionChange={changeColumnAction}
+              onPreprocessingChoiceChange={changePreprocessingChoice}
+              onApplySuggestedPreprocessing={applySuggestedPreprocessing}
               onSendToChat={sendAiReviewToChat}
             />
-
-            {datasetIntent && <DatasetIntentPanel intent={datasetIntent} />}
-
-            {proposedPreprocessingSteps.length > 0 && (
-              <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 p-3">
-                <div className="mb-3">
-                  <Text size="sm" bold>
-                    Preprocessing recommendations
-                  </Text>
-                  <Text size="xs" variant="secondary">
-                    Raw values are unchanged. Accepting a recommendation records
-                    intent for the preprocessing pipeline.
-                  </Text>
-                </div>
-                <div className="grid gap-2">
-                  {effectivePreprocessingSteps.map((step) => {
-                    const details = describePreprocessingStep(step);
-
-                    return (
-                      <div
-                        key={step.id}
-                        className="flex flex-col gap-2 rounded-lg border border-kumo-line bg-kumo-base p-3 sm:flex-row sm:items-center sm:justify-between"
-                      >
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <Text size="sm" bold>
-                              {details.title}
-                            </Text>
-                            <Badge
-                              variant={
-                                step.status === "accepted"
-                                  ? "primary"
-                                  : "secondary"
-                              }
-                            >
-                              {step.status}
-                            </Badge>
-                          </div>
-                          <Text size="xs" variant="secondary">
-                            {details.description}
-                          </Text>
-                        </div>
-                        <div className="flex gap-2">
-                          <Button
-                            type="button"
-                            variant="primary"
-                            size="sm"
-                            disabled={step.status === "accepted"}
-                            onClick={() =>
-                              updatePreprocessingStatus(step.id, "accepted")
-                            }
-                          >
-                            Accept
-                          </Button>
-                          <Button
-                            type="button"
-                            variant="secondary"
-                            size="sm"
-                            disabled={step.status === "rejected"}
-                            onClick={() =>
-                              updatePreprocessingStatus(step.id, "rejected")
-                            }
-                          >
-                            Reject
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-              <div className="mb-3">
-                <Text size="sm" bold>
-                  Preprocessing pipeline
-                </Text>
-                <Text size="xs" variant="secondary">
-                  Accepted steps are tracked separately from the raw dataset.
-                </Text>
-              </div>
-              {acceptedPreprocessingSteps.length > 0 ? (
-                <ol className="grid gap-2">
-                  {acceptedPreprocessingSteps.map((step, index) => {
-                    const details = describePreprocessingStep(step);
-
-                    return (
-                      <li
-                        key={step.id}
-                        className="flex items-start gap-2 rounded-lg border border-kumo-line bg-kumo-base p-2"
-                      >
-                        <Badge variant="primary">{index + 1}</Badge>
-                        <div>
-                          <Text size="sm" bold>
-                            {details.title}
-                          </Text>
-                          <Text size="xs" variant="secondary">
-                            {details.description}
-                          </Text>
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ol>
-              ) : (
-                <Text size="xs" variant="secondary">
-                  No preprocessing steps accepted yet.
-                </Text>
-              )}
-            </div>
 
             <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
               <div className="grid gap-3 border-b border-kumo-line p-3">
@@ -2144,28 +2209,6 @@ function DatasetWorkspace() {
                 )}
               </div>
             </div>
-
-            <details className="min-w-0 overflow-hidden rounded-lg border border-kumo-line bg-kumo-elevated">
-              <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-kumo-default">
-                Raw preview first {currentSummary.previewRows.length} rows
-              </summary>
-              <PreviewTable
-                columns={currentSummary.columns}
-                rows={currentSummary.previewRows}
-              />
-            </details>
-
-            {acceptedPreprocessingSteps.length > 0 && (
-              <details className="min-w-0 overflow-hidden rounded-lg border border-kumo-line bg-kumo-elevated">
-                <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-kumo-default">
-                  Transformed preview first {transformedPreviewRows.length} rows
-                </summary>
-                <PreviewTable
-                  columns={currentSummary.columns}
-                  rows={transformedPreviewRows}
-                />
-              </details>
-            )}
           </div>
         ) : (
           <Empty
