@@ -64,7 +64,10 @@ export interface ColumnSummary {
   name: string;
   inferredType: InferredColumnType;
   missingCount: number;
+  nonMissingCount: number;
   uniqueCount: number;
+  uniqueRatio: number;
+  topValues: { value: string; count: number; percent: number }[];
   sampleValues: string[];
   profilingNotes: ProfilingNote[];
 }
@@ -417,6 +420,24 @@ function buildDatasetSummary(file: File, rows: Record<string, unknown>[]) {
   const columns = fields.map((field) => {
     const values = rows.map((row) => String(row[field] ?? ""));
     const presentValues = values.filter((value) => !isMissing(value));
+    const uniqueValues = new Set(presentValues);
+    const topValues = Array.from(
+      presentValues.reduce((counts, value) => {
+        counts.set(value, (counts.get(value) ?? 0) + 1);
+        return counts;
+      }, new Map<string, number>())
+    )
+      .map(([value, count]) => ({
+        value,
+        count,
+        percent:
+          presentValues.length === 0 ? 0 : (count / presentValues.length) * 100
+      }))
+      .sort((left, right) => {
+        if (left.count !== right.count) return right.count - left.count;
+        return left.value.localeCompare(right.value);
+      })
+      .slice(0, 5);
     const uniqueSamples = Array.from(new Set(presentValues.slice(0, 10))).slice(
       0,
       5
@@ -426,7 +447,13 @@ function buildDatasetSummary(file: File, rows: Record<string, unknown>[]) {
       name: field,
       inferredType: inferColumnType(values),
       missingCount: values.filter(isMissing).length,
-      uniqueCount: new Set(presentValues).size,
+      nonMissingCount: presentValues.length,
+      uniqueCount: uniqueValues.size,
+      uniqueRatio:
+        presentValues.length === 0
+          ? 0
+          : uniqueValues.size / presentValues.length,
+      topValues,
       sampleValues: uniqueSamples,
       profilingNotes: buildProfilingNotes(field, values)
     };

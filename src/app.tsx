@@ -47,7 +47,9 @@ type ColumnSortKey =
   | "type"
   | "missingCount"
   | "missingPercent"
+  | "nonMissingCount"
   | "uniqueCount"
+  | "uniqueRatio"
   | "notesCount";
 
 type SortDirection = "asc" | "desc";
@@ -95,8 +97,12 @@ function getColumnSortValue(
       return column.missingCount;
     case "missingPercent":
       return getMissingPercent(column, rowCount);
+    case "nonMissingCount":
+      return column.nonMissingCount;
     case "uniqueCount":
       return column.uniqueCount;
+    case "uniqueRatio":
+      return column.uniqueRatio;
     case "notesCount":
       return column.profilingNotes.length;
   }
@@ -731,11 +737,24 @@ function DatasetWorkspace() {
                         onSort={updateColumnSort}
                       />
                       <SortableColumnHeader
+                        label="Non-missing"
+                        sortKey="nonMissingCount"
+                        currentSort={columnSort}
+                        onSort={updateColumnSort}
+                      />
+                      <SortableColumnHeader
                         label="Unique"
                         sortKey="uniqueCount"
                         currentSort={columnSort}
                         onSort={updateColumnSort}
                       />
+                      <SortableColumnHeader
+                        label="Unique ratio"
+                        sortKey="uniqueRatio"
+                        currentSort={columnSort}
+                        onSort={updateColumnSort}
+                      />
+                      <th className="px-3 py-2 font-medium">Top values</th>
                       <th className="px-3 py-2 font-medium">Samples</th>
                       <SortableColumnHeader
                         label="Notes"
@@ -766,7 +785,27 @@ function DatasetWorkspace() {
                           )}
                         </td>
                         <td className="px-3 py-2 text-kumo-subtle">
+                          {column.nonMissingCount.toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
                           {column.uniqueCount.toLocaleString()}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
+                          {formatPercent(column.uniqueRatio * 100)}
+                        </td>
+                        <td className="px-3 py-2 text-kumo-subtle">
+                          {column.topValues.length > 0 ? (
+                            <div className="grid gap-1">
+                              {column.topValues.map((topValue) => (
+                                <span key={topValue.value}>
+                                  {topValue.value} ({topValue.count},{" "}
+                                  {formatPercent(topValue.percent)})
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            "No non-empty values"
+                          )}
                         </td>
                         <td className="px-3 py-2 text-kumo-subtle">
                           {column.sampleValues.length > 0
