@@ -14,6 +14,10 @@ import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 
 const DEFAULT_AI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
+const JSON_GENERATION_SETTINGS = {
+  maxOutputTokens: 4096,
+  temperature: 0
+} as const;
 
 const columnAssumptionSchema = z.object({
   id: z.string(),
@@ -976,25 +980,17 @@ ${JSON.stringify(profile)}`;
 }
 
 function buildPreprocessingPrompt(profile: ReviewProfile, review: LlmReview) {
-  return `Return JSON only. Do not use Markdown. Do not include prose before or after the JSON.
+  return `Return compact JSON only. Do not use Markdown. Do not include prose before or after the JSON.
 
 Use this exact JSON shape:
-{
-  "preprocessingSuggestions": [
-    {
-      "columnName": "exact column name from input",
-      "action": "short human-readable step name",
-      "reason": "why this step fits this column",
-      "implementation": "one concise sentence describing how to apply it",
-      "alternatives": ["other plausible step names only"]
-    }
-  ]
-}
+{"preprocessingSuggestions":[{"columnName":"exact column name from input","action":"short step name","reason":"under 18 words","implementation":"under 18 words","alternatives":["step names only"]}]}
 
 Rules:
 - Include one preprocessingSuggestions entry for every input column.
+- Keep every reason and implementation under 18 words.
+- Keep alternatives to at most 3 short strings.
+- Use only these actions: No step, Trim whitespace, Lowercase text, Standardize missing-value tokens, Normalize boolean values, Fill missing values with the mean, Fill missing values with the median, Fill missing values with the most common value, One-hot encode categories, Split full names into parts, Drop column.
 - Prefer specific, dataset-aware recommendations over generic labels.
-- You may invent custom transformations when the column name, values, or profile justify them.
 - Keep recommendations practical and implementable from the available column values.
 - Do not suggest numeric imputation for boolean or string columns.
 - Do not suggest categorical mode imputation for numeric columns.
@@ -1028,29 +1024,21 @@ function buildColumnPreprocessingPrompt({
     )
   };
 
-  return `Return JSON only. Do not use Markdown. Do not include prose before or after the JSON.
+  return `Return compact JSON only. Do not use Markdown. Do not include prose before or after the JSON.
 
 Suggest preprocessing only for kept feature columns. The target column is ${JSON.stringify(targetColumn)} and must not receive a preprocessing step.
 
 Use this exact JSON shape:
-{
-  "preprocessingSuggestions": [
-    {
-      "columnName": "exact kept column name from input",
-      "action": "short human-readable step name, such as Robust median imputation, Parse cabin deck, Bucket rare categories, or No step",
-      "reason": "why this step fits this column",
-      "implementation": "one concise sentence describing how to apply it",
-      "alternatives": ["other plausible step names only"]
-    }
-  ]
-}
+{"preprocessingSuggestions":[{"columnName":"exact kept column name","action":"short step name","reason":"under 18 words","implementation":"under 18 words","alternatives":["step names only"]}]}
 
 Rules:
 - Include one preprocessingSuggestions entry for every kept feature column.
 - Do not include dropped columns.
 - Do not include the target column.
+- Keep every reason and implementation under 18 words.
+- Keep alternatives to at most 3 short strings.
+- Use only these actions: No step, Trim whitespace, Lowercase text, Standardize missing-value tokens, Normalize boolean values, Fill missing values with the mean, Fill missing values with the median, Fill missing values with the most common value, One-hot encode categories, Split full names into parts, Drop column.
 - Prefer specific, dataset-aware recommendations over generic labels.
-- You may invent custom transformations when the column name, values, or profile justify them.
 - Keep recommendations practical and implementable from the available column values.
 - Do not suggest numeric imputation for boolean or string columns.
 - Do not suggest categorical mode imputation for numeric columns.
@@ -1061,6 +1049,27 @@ ${JSON.stringify(keptColumns)}
 
 Scoped input profile:
 ${JSON.stringify(scopedProfile)}`;
+}
+
+function buildFallbackColumnPreprocessingResponse(
+  profile: ReviewProfile,
+  keptColumns: string[],
+  warning?: string
+) {
+  return {
+    preprocessingSuggestions: keptColumns
+      .map((columnName) => {
+        const column = profile.columns.find((item) => item.name === columnName);
+        if (!column) return null;
+        return defaultPreprocessingSuggestion(
+          column,
+          buildLocalAssumption(column)
+        );
+      })
+      .filter(Boolean),
+    globalWarnings: warning ? [warning] : [],
+    nextQuestions: []
+  };
 }
 
 function inlineDataUrls(messages: ModelMessage[]): ModelMessage[] {
@@ -1110,6 +1119,7 @@ async function handleAiReview(request: Request, env: Env) {
 
   const result = await generateText({
     model: workersai(model),
+    ...JSON_GENERATION_SETTINGS,
     system:
       "You review compact CSV profiles for preprocessing planning. You output JSON only.",
     prompt: buildReviewPrompt(profile)
@@ -1127,6 +1137,7 @@ async function handleAiReview(request: Request, env: Env) {
 
   const preprocessingResult = await generateText({
     model: workersai(model),
+    ...JSON_GENERATION_SETTINGS,
     system:
       "You suggest CSV preprocessing steps. You output one JSON object only.",
     prompt: buildPreprocessingPrompt(profile, parsedReview.review)
@@ -1178,6 +1189,7 @@ async function handleColumnSelection(request: Request, env: Env) {
   const profile = parsedProfile.data;
   const result = await generateText({
     model: workersai(model),
+    ...JSON_GENERATION_SETTINGS,
     system:
       "You decide which CSV columns should be kept before preprocessing. You output JSON only.",
     prompt: buildColumnSelectionPrompt(profile)
@@ -1224,6 +1236,7 @@ async function handlePreprocessingReview(request: Request, env: Env) {
   const model = env.AI_MODEL || DEFAULT_AI_MODEL;
   const result = await generateText({
     model: workersai(model),
+    ...JSON_GENERATION_SETTINGS,
     system:
       "You suggest preprocessing steps for selected CSV columns. You output JSON only.",
     prompt: buildColumnPreprocessingPrompt({
@@ -1240,24 +1253,13 @@ async function handlePreprocessingReview(request: Request, env: Env) {
       generatedText: result.text.slice(0, 500)
     });
 
-    return Response.json({
-      preprocessingSuggestions: sanitizedKeptColumns
-        .map((columnName) => {
-          const column = profile.columns.find(
-            (item) => item.name === columnName
-          );
-          if (!column) return null;
-          return defaultPreprocessingSuggestion(
-            column,
-            buildLocalAssumption(column)
-          );
-        })
-        .filter(Boolean),
-      globalWarnings: [
+    return Response.json(
+      buildFallbackColumnPreprocessingResponse(
+        profile,
+        sanitizedKeptColumns,
         "AI preprocessing response could not be parsed. Showing deterministic fallback suggestions."
-      ],
-      nextQuestions: []
-    });
+      )
+    );
   }
 
   const suggestionsByColumn = new Map(
@@ -1347,7 +1349,8 @@ export class ChatAgent extends AIChatAgent<Env> {
 
 ${getSchedulePrompt({ date: new Date() })}
 
-If the user asks to schedule a task or reminder, use the schedule tool.`,
+If the user asks to schedule a task or reminder, use the schedule tool.
+If the user asks about the active CSV, current preprocessing plan, next feature to inspect, leakage risks, or what to do next, call getActiveDatasetContext before answering.`,
       messages: pruneMessages({
         messages,
         toolCalls: "before-last-2-messages"
@@ -1357,6 +1360,11 @@ If the user asks to schedule a task or reminder, use the schedule tool.`,
         getUserTimezone: tool({
           description:
             "Get the user's timezone from their browser when local time matters.",
+          inputSchema: z.object({})
+        }),
+        getActiveDatasetContext: tool({
+          description:
+            "Get the active CSV profile, target, kept features, dropped columns, and approved preprocessing choices from the browser.",
           inputSchema: z.object({})
         }),
         calculate: tool({

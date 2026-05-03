@@ -2,6 +2,8 @@ import { describe, expect, test } from "vitest";
 import {
   buildAiReviewProfile,
   buildDatasetIntent,
+  parseCsvFile,
+  transformCsvFile,
   type ColumnAssumption,
   type DatasetSummary
 } from "./csv-profile";
@@ -124,5 +126,89 @@ describe("buildDatasetIntent", () => {
     expect(intent.conflicts).toContain(
       "empty_col is empty but accepted as target."
     );
+  });
+});
+
+describe("parseCsvFile", () => {
+  test("profiles all rows instead of only the first 1,000", async () => {
+    const rows = Array.from({ length: 1005 }, (_, index) => {
+      const rowNumber = index + 1;
+      return [
+        `id-${rowNumber}`,
+        rowNumber <= 1000 ? String(rowNumber) : "not-a-number",
+        rowNumber <= 1000 ? "present" : ""
+      ].join(",");
+    });
+    const file = new File(
+      [`id,value,late_missing\n${rows.join("\n")}`],
+      "full.csv",
+      { type: "text/csv" }
+    );
+
+    const parsed = await parseCsvFile(file);
+    const value = parsed.columns.find((column) => column.name === "value");
+    const lateMissing = parsed.columns.find(
+      (column) => column.name === "late_missing"
+    );
+
+    expect(parsed.parsedRowCount).toBe(1005);
+    expect(parsed.previewRows).toHaveLength(20);
+    expect(value?.inferredType).toBe("mixed");
+    expect(lateMissing?.missingCount).toBe(5);
+    expect(parsed.warnings).toContain("Profiled all 1,005 parsed rows.");
+  });
+});
+
+describe("transformCsvFile", () => {
+  test("applies multiple steps to one feature and keeps target unchanged", async () => {
+    const file = new File(
+      [
+        [
+          "Name,Embarked,Survived",
+          '"Braund, Mr. Owen Harris",S,0',
+          '"Cumings, Mrs. John Bradley",C,1'
+        ].join("\n")
+      ],
+      "titanic.csv",
+      { type: "text/csv" }
+    );
+
+    const transformed = await transformCsvFile(file, {
+      targetColumn: "Survived",
+      featureColumns: ["Name", "Embarked"],
+      preprocessingSteps: [
+        { columnName: "Name", action: "Trim whitespace" },
+        { columnName: "Name", action: "Lowercase text" },
+        { columnName: "Name", action: "Split full names into parts" },
+        { columnName: "Embarked", action: "One-hot encode categories" }
+      ]
+    });
+
+    expect(transformed.outputColumns).toEqual([
+      "Name_first",
+      "Name_last",
+      "Embarked__c",
+      "Embarked__s",
+      "Survived"
+    ]);
+    expect(transformed.csv).toContain("owen,harris,0,1,0");
+    expect(transformed.csv).toContain("john,bradley,1,0,1");
+    expect(transformed.audit).toContain(
+      "Target Survived was kept unchanged and excluded from feature transforms."
+    );
+  });
+
+  test("blocks target leakage in preprocessing steps", async () => {
+    const file = new File(["age,churn\n32,yes"], "leak.csv", {
+      type: "text/csv"
+    });
+
+    await expect(
+      transformCsvFile(file, {
+        targetColumn: "churn",
+        featureColumns: ["age"],
+        preprocessingSteps: [{ columnName: "churn", action: "Lowercase text" }]
+      })
+    ).rejects.toThrow("Target leakage blocked");
   });
 });

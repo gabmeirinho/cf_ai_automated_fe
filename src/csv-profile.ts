@@ -162,6 +162,24 @@ export interface TransformationDecision {
 
 export type PreprocessingSuggestionAction = string;
 
+export interface SelectedPreprocessingStep {
+  columnName: string;
+  action: PreprocessingSuggestionAction;
+}
+
+export interface CsvTransformationPlan {
+  targetColumn: string;
+  featureColumns: string[];
+  preprocessingSteps: SelectedPreprocessingStep[];
+}
+
+export interface CsvTransformationResult {
+  csv: string;
+  rowCount: number;
+  outputColumns: string[];
+  audit: string[];
+}
+
 export interface PreprocessingSuggestion {
   columnName: string;
   action: PreprocessingSuggestionAction;
@@ -463,24 +481,19 @@ function looksDate(value: string) {
   return Number.isFinite(timestamp);
 }
 
-function inferColumnType(values: string[]): InferredColumnType {
-  const present = values.filter((value) => !isMissing(value));
-  if (present.length === 0) return "empty";
-
-  const checks: Array<[InferredColumnType, (value: string) => boolean]> = [
-    ["number", looksNumber],
-    ["boolean", looksBoolean],
-    ["date", looksDate]
-  ];
-
-  for (const [type, check] of checks) {
-    if (present.every(check)) return type;
+function inferColumnTypeFromStats(column: ColumnProfiler): InferredColumnType {
+  if (column.nonMissingCount === 0) return "empty";
+  if (column.numberCount === column.nonMissingCount) return "number";
+  if (column.booleanCount === column.nonMissingCount) return "boolean";
+  if (column.dateCount === column.nonMissingCount) return "date";
+  if (
+    column.numberCount > 0 ||
+    column.booleanCount > 0 ||
+    column.dateCount > 0
+  ) {
+    return "mixed";
   }
-
-  const hasStructuredSignal = present.some(
-    (value) => looksNumber(value) || looksBoolean(value) || looksDate(value)
-  );
-  return hasStructuredSignal ? "mixed" : "string";
+  return "string";
 }
 
 function normalizePreviewValue(value: unknown): PreviewValue {
@@ -514,6 +527,83 @@ export function renderPreviewValue(value: PreviewValue) {
   if (text === "") return '""';
   if (text !== text.trim()) return JSON.stringify(text);
   return text;
+}
+
+function normalizeActionName(action: string) {
+  return action.trim().toLowerCase().replaceAll("_", " ");
+}
+
+function isNoStepAction(action: string) {
+  const normalized = normalizeActionName(action);
+  return normalized === "none" || normalized === "no step";
+}
+
+function isDropColumnAction(action: string) {
+  const normalized = normalizeActionName(action);
+  return normalized === "drop" || normalized === "drop column";
+}
+
+function isTrimWhitespaceAction(action: string) {
+  return /trim/.test(normalizeActionName(action));
+}
+
+function isLowercaseAction(action: string) {
+  const normalized = normalizeActionName(action);
+  return /lowercase|lower case|case fold/.test(normalized);
+}
+
+function isStandardizeMissingAction(action: string) {
+  const normalized = normalizeActionName(action);
+  return /standardize missing|missing value tokens|missing-value tokens/.test(
+    normalized
+  );
+}
+
+function isNormalizeBooleanAction(action: string) {
+  const normalized = normalizeActionName(action);
+  return /normalize boolean|standardize boolean/.test(normalized);
+}
+
+function isFillMeanAction(action: string) {
+  return /fill missing.*mean|mean imputation/.test(normalizeActionName(action));
+}
+
+function isFillMedianAction(action: string) {
+  return /fill missing.*median|median imputation/.test(
+    normalizeActionName(action)
+  );
+}
+
+function isFillModeAction(action: string) {
+  const normalized = normalizeActionName(action);
+  return /fill missing.*most common|fill missing.*mode|mode imputation/.test(
+    normalized
+  );
+}
+
+function isOneHotAction(action: string) {
+  return /one hot|one-hot/.test(normalizeActionName(action));
+}
+
+function isSplitNameAction(action: string) {
+  const normalized = normalizeActionName(action);
+  return /split.*name|name.*parts|extract.*name/.test(normalized);
+}
+
+function isSupportedTransformationAction(action: string) {
+  return (
+    isNoStepAction(action) ||
+    isDropColumnAction(action) ||
+    isTrimWhitespaceAction(action) ||
+    isLowercaseAction(action) ||
+    isStandardizeMissingAction(action) ||
+    isNormalizeBooleanAction(action) ||
+    isFillMeanAction(action) ||
+    isFillMedianAction(action) ||
+    isFillModeAction(action) ||
+    isOneHotAction(action) ||
+    isSplitNameAction(action)
+  );
 }
 
 function standardizeBooleanValue(value: string, step: PreprocessingStep) {
@@ -660,7 +750,7 @@ export function buildProfilingNotes(
   } else if (missingRatio >= HIGH_MISSINGNESS_THRESHOLD) {
     notes.push({
       code: "high_missingness",
-      message: `${field} is missing at least ${Math.round(HIGH_MISSINGNESS_THRESHOLD * 100)}% of sampled rows.`,
+      message: `${field} is missing at least ${Math.round(HIGH_MISSINGNESS_THRESHOLD * 100)}% of parsed rows.`,
       affectedCount: missingCount
     });
   }
@@ -678,6 +768,233 @@ export function buildProfilingNotes(
     notes.push({
       code: "likely_identifier",
       message: `${field} is likely an identifier because most non-empty values are unique.`,
+      affectedCount: uniqueCount
+    });
+  }
+
+  return notes;
+}
+
+interface ColumnProfiler {
+  name: string;
+  rowCount: number;
+  missingCount: number;
+  nonMissingCount: number;
+  numberCount: number;
+  booleanCount: number;
+  dateCount: number;
+  whitespaceCount: number;
+  numericAfterTrimCount: number;
+  booleanAfterCaseFoldCount: number;
+  dateAfterTrimCount: number;
+  missingLikeTokenCount: number;
+  valueCounts: Map<string, number>;
+  sampleValues: string[];
+  caseCountsByTrimmedValue: Map<string, number>;
+  caseVariantsByLowerValue: Map<string, Set<string>>;
+}
+
+interface CsvProfiler {
+  fields: string[];
+  columns: Map<string, ColumnProfiler>;
+  previewRows: Record<string, PreviewValue>[];
+  rowCount: number;
+  fieldErrorCount: number;
+}
+
+function createColumnProfiler(name: string): ColumnProfiler {
+  return {
+    name,
+    rowCount: 0,
+    missingCount: 0,
+    nonMissingCount: 0,
+    numberCount: 0,
+    booleanCount: 0,
+    dateCount: 0,
+    whitespaceCount: 0,
+    numericAfterTrimCount: 0,
+    booleanAfterCaseFoldCount: 0,
+    dateAfterTrimCount: 0,
+    missingLikeTokenCount: 0,
+    valueCounts: new Map(),
+    sampleValues: [],
+    caseCountsByTrimmedValue: new Map(),
+    caseVariantsByLowerValue: new Map()
+  };
+}
+
+function createCsvProfiler(fields: string[]): CsvProfiler {
+  return {
+    fields,
+    columns: new Map(
+      fields.map((field) => [field, createColumnProfiler(field)])
+    ),
+    previewRows: [],
+    rowCount: 0,
+    fieldErrorCount: 0
+  };
+}
+
+function addColumnValue(column: ColumnProfiler, rawValue: unknown) {
+  const value = String(rawValue ?? "");
+  const trimmed = value.trim();
+
+  column.rowCount += 1;
+
+  if (isMissing(value)) {
+    column.missingCount += 1;
+  } else {
+    column.nonMissingCount += 1;
+    column.valueCounts.set(value, (column.valueCounts.get(value) ?? 0) + 1);
+
+    if (
+      !column.sampleValues.includes(value) &&
+      column.sampleValues.length < 5
+    ) {
+      column.sampleValues.push(value);
+    }
+  }
+
+  if (looksNumber(value)) column.numberCount += 1;
+  if (looksBoolean(value)) column.booleanCount += 1;
+  if (looksDate(value)) column.dateCount += 1;
+
+  if (value.length > 0 && value !== trimmed) {
+    column.whitespaceCount += 1;
+  }
+  if (value !== trimmed && looksNumber(trimmed)) {
+    column.numericAfterTrimCount += 1;
+  }
+  if (looksBoolean(trimmed) && trimmed !== trimmed.toLowerCase()) {
+    column.booleanAfterCaseFoldCount += 1;
+  }
+  if (value !== trimmed && looksDate(trimmed)) {
+    column.dateAfterTrimCount += 1;
+  }
+  if (isMissingLikeToken(value)) {
+    column.missingLikeTokenCount += 1;
+  }
+  if (trimmed) {
+    column.caseCountsByTrimmedValue.set(
+      trimmed,
+      (column.caseCountsByTrimmedValue.get(trimmed) ?? 0) + 1
+    );
+    const lower = trimmed.toLowerCase();
+    const variants = column.caseVariantsByLowerValue.get(lower) ?? new Set();
+    variants.add(trimmed);
+    column.caseVariantsByLowerValue.set(lower, variants);
+  }
+}
+
+function addProfilerRow(profiler: CsvProfiler, row: Record<string, unknown>) {
+  profiler.rowCount += 1;
+
+  if (profiler.previewRows.length < MAX_PREVIEW_ROWS) {
+    profiler.previewRows.push(
+      Object.fromEntries(
+        profiler.fields.map((field) => [
+          field,
+          normalizePreviewValue(row[field])
+        ])
+      )
+    );
+  }
+
+  profiler.fields.forEach((field) => {
+    const column = profiler.columns.get(field);
+    if (column) addColumnValue(column, row[field]);
+  });
+}
+
+function getCaseVariantCount(column: ColumnProfiler) {
+  let count = 0;
+
+  for (const variants of column.caseVariantsByLowerValue.values()) {
+    if (variants.size <= 1) continue;
+    for (const variant of variants) {
+      count += column.caseCountsByTrimmedValue.get(variant) ?? 0;
+    }
+  }
+
+  return count;
+}
+
+function buildProfilingNotesFromProfiler(column: ColumnProfiler) {
+  const notes: ProfilingNote[] = [];
+  const uniqueCount = column.valueCounts.size;
+  const missingRatio =
+    column.rowCount === 0 ? 0 : column.missingCount / column.rowCount;
+  const caseVariantCount = getCaseVariantCount(column);
+
+  if (column.whitespaceCount > 0) {
+    notes.push({
+      code: "leading_trailing_whitespace",
+      message: `${column.name} contains leading or trailing whitespace. Raw preview keeps those values unchanged.`,
+      affectedCount: column.whitespaceCount
+    });
+  }
+  if (caseVariantCount > 0) {
+    notes.push({
+      code: "case_variants",
+      message: `${column.name} contains values that differ only by letter case.`,
+      affectedCount: caseVariantCount
+    });
+  }
+  if (column.numericAfterTrimCount > 0) {
+    notes.push({
+      code: "numeric_after_trim",
+      message: `${column.name} has numeric-like values after trimming whitespace.`,
+      affectedCount: column.numericAfterTrimCount
+    });
+  }
+  if (column.booleanAfterCaseFoldCount > 0) {
+    notes.push({
+      code: "boolean_after_case_fold",
+      message: `${column.name} has boolean-like values after case normalization.`,
+      affectedCount: column.booleanAfterCaseFoldCount
+    });
+  }
+  if (column.dateAfterTrimCount > 0) {
+    notes.push({
+      code: "date_after_trim",
+      message: `${column.name} has date-like values after trimming whitespace.`,
+      affectedCount: column.dateAfterTrimCount
+    });
+  }
+  if (column.missingLikeTokenCount > 0) {
+    notes.push({
+      code: "missing_like_tokens",
+      message: `${column.name} contains tokens that commonly represent missing values.`,
+      affectedCount: column.missingLikeTokenCount
+    });
+  }
+  if (column.missingCount === column.rowCount) {
+    notes.push({
+      code: "empty_column",
+      message: `${column.name} has no non-empty values.`,
+      affectedCount: column.missingCount
+    });
+  } else if (missingRatio >= HIGH_MISSINGNESS_THRESHOLD) {
+    notes.push({
+      code: "high_missingness",
+      message: `${column.name} is missing at least ${Math.round(HIGH_MISSINGNESS_THRESHOLD * 100)}% of parsed rows.`,
+      affectedCount: column.missingCount
+    });
+  }
+  if (uniqueCount === 1 && column.nonMissingCount > 0) {
+    notes.push({
+      code: "constant_column",
+      message: `${column.name} has only one unique non-empty value.`,
+      affectedCount: column.nonMissingCount
+    });
+  }
+  if (
+    column.nonMissingCount >= MIN_IDENTIFIER_ROW_COUNT &&
+    uniqueCount / column.rowCount >= LIKELY_IDENTIFIER_UNIQUE_RATIO
+  ) {
+    notes.push({
+      code: "likely_identifier",
+      message: `${column.name} is likely an identifier because most non-empty values are unique.`,
       affectedCount: uniqueCount
     });
   }
@@ -736,91 +1053,377 @@ function buildPreprocessingSteps(
   return steps;
 }
 
-function buildDatasetSummary(file: File, rows: Record<string, unknown>[]) {
-  const firstRow = rows[0];
-  const fields = firstRow ? Object.keys(firstRow) : [];
+function buildDatasetSummary(file: File, profiler: CsvProfiler) {
+  const fields = profiler.fields;
   const warnings: string[] = [];
 
   if (fields.length === 0) {
     throw new Error("CSV has no usable header row.");
   }
 
-  if (rows.length === 0) {
+  if (profiler.rowCount === 0) {
     throw new Error("CSV has no data rows.");
   }
 
-  if (rows.length >= MAX_INFERENCE_ROWS) {
-    warnings.push(
-      `Schema was inferred from the first ${MAX_INFERENCE_ROWS.toLocaleString()} rows.`
-    );
-  }
-
   const columns = fields.map((field) => {
-    const values = rows.map((row) => String(row[field] ?? ""));
-    const presentValues = values.filter((value) => !isMissing(value));
-    const uniqueValues = new Set(presentValues);
-    const topValues = Array.from(
-      presentValues.reduce((counts, value) => {
-        counts.set(value, (counts.get(value) ?? 0) + 1);
-        return counts;
-      }, new Map<string, number>())
-    )
+    const column = profiler.columns.get(field) ?? createColumnProfiler(field);
+    const topValues = Array.from(column.valueCounts)
       .map(([value, count]) => ({
         value,
         count,
         percent:
-          presentValues.length === 0 ? 0 : (count / presentValues.length) * 100
+          column.nonMissingCount === 0
+            ? 0
+            : (count / column.nonMissingCount) * 100
       }))
       .sort((left, right) => {
         if (left.count !== right.count) return right.count - left.count;
         return left.value.localeCompare(right.value);
       })
       .slice(0, 5);
-    const uniqueSamples = Array.from(new Set(presentValues.slice(0, 10))).slice(
-      0,
-      5
-    );
 
     return {
       name: field,
-      inferredType: inferColumnType(values),
-      missingCount: values.filter(isMissing).length,
-      nonMissingCount: presentValues.length,
-      uniqueCount: uniqueValues.size,
+      inferredType: inferColumnTypeFromStats(column),
+      missingCount: column.missingCount,
+      nonMissingCount: column.nonMissingCount,
+      uniqueCount: column.valueCounts.size,
       uniqueRatio:
-        presentValues.length === 0
+        column.nonMissingCount === 0
           ? 0
-          : uniqueValues.size / presentValues.length,
+          : column.valueCounts.size / column.nonMissingCount,
       topValues,
-      sampleValues: uniqueSamples,
-      profilingNotes: buildProfilingNotes(field, values)
+      sampleValues: column.sampleValues,
+      profilingNotes: buildProfilingNotesFromProfiler(column)
     };
   });
 
   return {
     fileName: file.name,
     fileSizeBytes: file.size,
-    parsedRowCount: rows.length,
+    parsedRowCount: profiler.rowCount,
     columns,
-    previewRows: rows
-      .slice(0, MAX_PREVIEW_ROWS)
-      .map((row) =>
-        Object.fromEntries(
-          fields.map((field) => [field, normalizePreviewValue(row[field])])
-        )
-      ),
+    previewRows: profiler.previewRows,
     warnings,
     proposedPreprocessingSteps: buildPreprocessingSteps(columns)
   } satisfies DatasetSummary;
 }
 
-export function parseCsvFile(file: File): Promise<DatasetSummary> {
+function sanitizeColumnSuffix(value: string) {
+  const suffix = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 48);
+  return suffix || "value";
+}
+
+function getCell(row: Record<string, unknown>, columnName: string) {
+  return String(row[columnName] ?? "");
+}
+
+function median(values: number[]) {
+  if (values.length === 0) return "";
+  const sorted = [...values].sort((left, right) => left - right);
+  const midpoint = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return String(sorted[midpoint]);
+  return String((sorted[midpoint - 1] + sorted[midpoint]) / 2);
+}
+
+function mode(values: string[]) {
+  const counts = new Map<string, number>();
+  values
+    .filter((value) => !isMissing(value))
+    .forEach((value) => counts.set(value, (counts.get(value) ?? 0) + 1));
+
+  const first = Array.from(counts).sort((left, right) => {
+    if (left[1] !== right[1]) return right[1] - left[1];
+    return left[0].localeCompare(right[0]);
+  })[0];
+
+  return first?.[0] ?? "";
+}
+
+function parseFullName(value: string) {
+  const withoutTitle = value.replace(
+    /^[^,]+,\s*(Mr|Mrs|Miss|Ms|Master|Dr|Rev|Col|Major|Sir|Lady|Don|Dona)\.?\s+/i,
+    ""
+  );
+  const normalized = withoutTitle.includes(",")
+    ? withoutTitle.split(",").reverse().join(" ")
+    : withoutTitle;
+  const parts = normalized.trim().split(/\s+/).filter(Boolean);
+
+  return {
+    first: parts[0] ?? "",
+    last: parts.length > 1 ? parts[parts.length - 1] : ""
+  };
+}
+
+function groupStepsByColumn(steps: SelectedPreprocessingStep[]) {
+  const grouped = new Map<string, string[]>();
+
+  steps.forEach((step) => {
+    if (isNoStepAction(step.action)) return;
+    const current = grouped.get(step.columnName) ?? [];
+    if (!current.includes(step.action)) current.push(step.action);
+    grouped.set(step.columnName, current);
+  });
+
+  return grouped;
+}
+
+function sortColumnActions(actions: string[]) {
+  const priority = (action: string) => {
+    if (isStandardizeMissingAction(action)) return 10;
+    if (isTrimWhitespaceAction(action)) return 20;
+    if (isLowercaseAction(action)) return 30;
+    if (isNormalizeBooleanAction(action)) return 40;
+    if (isFillMeanAction(action) || isFillMedianAction(action)) return 50;
+    if (isFillModeAction(action)) return 60;
+    if (isSplitNameAction(action)) return 70;
+    if (isOneHotAction(action)) return 80;
+    if (isDropColumnAction(action)) return 90;
+    return 100;
+  };
+
+  return [...actions].sort((left, right) => priority(left) - priority(right));
+}
+
+function buildTransformStats(
+  rows: Record<string, unknown>[],
+  featureColumns: string[],
+  stepsByColumn: Map<string, string[]>
+) {
+  const stats = new Map<
+    string,
+    {
+      mean?: string;
+      median?: string;
+      mode?: string;
+      categories?: string[];
+    }
+  >();
+
+  featureColumns.forEach((columnName) => {
+    const actions = stepsByColumn.get(columnName) ?? [];
+    const values = rows.map((row) => getCell(row, columnName));
+    const numericValues = values
+      .filter((value) => !isMissing(value) && looksNumber(value))
+      .map(Number);
+    const categories = Array.from(
+      new Set(values.map((value) => value.trim()).filter(Boolean))
+    ).sort((left, right) => left.localeCompare(right));
+    const columnStats: {
+      mean?: string;
+      median?: string;
+      mode?: string;
+      categories?: string[];
+    } = {};
+
+    if (actions.some(isFillMeanAction) && numericValues.length > 0) {
+      columnStats.mean = String(
+        numericValues.reduce((sum, value) => sum + value, 0) /
+          numericValues.length
+      );
+    }
+    if (actions.some(isFillMedianAction)) {
+      columnStats.median = median(numericValues);
+    }
+    if (actions.some(isFillModeAction)) {
+      columnStats.mode = mode(values);
+    }
+    if (actions.some(isOneHotAction)) {
+      columnStats.categories = categories;
+    }
+
+    stats.set(columnName, columnStats);
+  });
+
+  return stats;
+}
+
+function transformColumnValue(
+  value: string,
+  actions: string[],
+  columnStats: {
+    mean?: string;
+    median?: string;
+    mode?: string;
+  }
+) {
+  let nextValue = value;
+
+  sortColumnActions(actions).forEach((action) => {
+    if (isStandardizeMissingAction(action) && isMissingLikeToken(nextValue)) {
+      nextValue = "";
+    } else if (isTrimWhitespaceAction(action)) {
+      nextValue = nextValue.trim();
+    } else if (isLowercaseAction(action)) {
+      nextValue = nextValue.toLowerCase();
+    } else if (isNormalizeBooleanAction(action) && looksBoolean(nextValue)) {
+      nextValue = /^(true|1|yes)$/i.test(nextValue.trim()) ? "true" : "false";
+    } else if (isFillMeanAction(action) && isMissing(nextValue)) {
+      nextValue = columnStats.mean ?? nextValue;
+    } else if (isFillMedianAction(action) && isMissing(nextValue)) {
+      nextValue = columnStats.median ?? nextValue;
+    } else if (isFillModeAction(action) && isMissing(nextValue)) {
+      nextValue = columnStats.mode ?? nextValue;
+    }
+  });
+
+  return nextValue;
+}
+
+function validateTransformationPlan(
+  fields: string[],
+  plan: CsvTransformationPlan
+) {
+  const fieldSet = new Set(fields);
+  const featureSet = new Set(plan.featureColumns);
+
+  if (!fieldSet.has(plan.targetColumn)) {
+    throw new Error("The target column is not present in the CSV.");
+  }
+  if (featureSet.has(plan.targetColumn)) {
+    throw new Error("Target leakage blocked: target cannot be a feature.");
+  }
+
+  plan.featureColumns.forEach((columnName) => {
+    if (!fieldSet.has(columnName)) {
+      throw new Error(`${columnName} is not present in the CSV.`);
+    }
+  });
+
+  plan.preprocessingSteps.forEach((step) => {
+    if (step.columnName === plan.targetColumn) {
+      throw new Error("Target leakage blocked: target cannot be transformed.");
+    }
+    if (!featureSet.has(step.columnName)) {
+      throw new Error(
+        `${step.columnName} cannot be transformed because it is not a kept feature.`
+      );
+    }
+    if (!isSupportedTransformationAction(step.action)) {
+      throw new Error(`${step.action} is not a supported export transform.`);
+    }
+  });
+}
+
+export async function transformCsvFile(
+  file: File,
+  plan: CsvTransformationPlan
+): Promise<CsvTransformationResult> {
+  const source = await file.text();
+  const parsed = Papa.parse<Record<string, unknown>>(source, {
+    header: true,
+    skipEmptyLines: true,
+    transformHeader: (header, index) => header.trim() || `unnamed_${index + 1}`
+  });
+
+  const duplicateHeaders = (
+    parsed.meta as Papa.ParseMeta & {
+      renamedHeaders?: Record<string, string>;
+    }
+  ).renamedHeaders;
+
+  if (duplicateHeaders && Object.keys(duplicateHeaders).length > 0) {
+    throw new Error("CSV contains duplicate column names.");
+  }
+
+  const severeError = parsed.errors.find(
+    (error) => error.code !== "TooFewFields" && error.code !== "TooManyFields"
+  );
+  if (severeError) {
+    throw new Error(severeError.message || "CSV parsing failed.");
+  }
+
+  const fields = parsed.meta.fields ?? Object.keys(parsed.data[0] ?? {});
+  validateTransformationPlan(fields, plan);
+
+  const stepsByColumn = groupStepsByColumn(plan.preprocessingSteps);
+  const transformStats = buildTransformStats(
+    parsed.data,
+    plan.featureColumns,
+    stepsByColumn
+  );
+  const outputRows = parsed.data.map((row) => {
+    const output: Record<string, string> = {};
+
+    plan.featureColumns.forEach((columnName) => {
+      const actions = sortColumnActions(stepsByColumn.get(columnName) ?? []);
+      const columnStats = transformStats.get(columnName) ?? {};
+      const transformedValue = transformColumnValue(
+        getCell(row, columnName),
+        actions,
+        columnStats
+      );
+
+      if (actions.some(isDropColumnAction)) return;
+
+      if (actions.some(isSplitNameAction)) {
+        const parsedName = parseFullName(transformedValue);
+        output[`${columnName}_first`] = parsedName.first;
+        output[`${columnName}_last`] = parsedName.last;
+        return;
+      }
+
+      if (actions.some(isOneHotAction)) {
+        const categories = columnStats.categories ?? [];
+        categories.forEach((category) => {
+          output[`${columnName}__${sanitizeColumnSuffix(category)}`] =
+            transformedValue.trim() === category ? "1" : "0";
+        });
+        return;
+      }
+
+      output[columnName] = transformedValue;
+    });
+
+    output[plan.targetColumn] = getCell(row, plan.targetColumn);
+    return output;
+  });
+  const outputColumns = Array.from(
+    outputRows.reduce((columns, row) => {
+      Object.keys(row).forEach((columnName) => columns.add(columnName));
+      return columns;
+    }, new Set<string>())
+  );
+  const audit = [
+    `Target ${plan.targetColumn} was kept unchanged and excluded from feature transforms.`,
+    `${plan.featureColumns.length.toLocaleString()} feature column${plan.featureColumns.length === 1 ? "" : "s"} were eligible for export.`,
+    `${plan.preprocessingSteps.filter((step) => !isNoStepAction(step.action)).length.toLocaleString()} preprocessing step${plan.preprocessingSteps.length === 1 ? "" : "s"} applied.`,
+    "No transform reads from the target column."
+  ];
+
+  return {
+    csv: Papa.unparse(outputRows, { columns: outputColumns }),
+    rowCount: outputRows.length,
+    outputColumns,
+    audit
+  };
+}
+
+export async function parseCsvFile(file: File): Promise<DatasetSummary> {
+  const source =
+    !("FileReader" in globalThis) && !("FileReaderSync" in globalThis)
+      ? await file.text()
+      : file;
+
   return new Promise((resolve, reject) => {
     let generatedHeaderCount = 0;
+    let profiler: CsvProfiler | null = null;
+    let failed = false;
 
-    Papa.parse<Record<string, unknown>>(file, {
+    const rejectOnce = (error: Error) => {
+      if (failed) return;
+      failed = true;
+      reject(error);
+    };
+
+    Papa.parse<Record<string, unknown>>(source, {
       header: true,
-      preview: MAX_INFERENCE_ROWS,
       skipEmptyLines: true,
       transformHeader: (header, index) => {
         const trimmed = header.trim();
@@ -828,7 +1431,7 @@ export function parseCsvFile(file: File): Promise<DatasetSummary> {
         generatedHeaderCount += 1;
         return `unnamed_${index + 1}`;
       },
-      complete: (results) => {
+      chunk: (results, parser) => {
         const renamedHeaders = (
           results.meta as Papa.ParseMeta & {
             renamedHeaders?: Record<string, string>;
@@ -836,7 +1439,8 @@ export function parseCsvFile(file: File): Promise<DatasetSummary> {
         ).renamedHeaders;
 
         if (renamedHeaders && Object.keys(renamedHeaders).length > 0) {
-          reject(new Error("CSV contains duplicate column names."));
+          rejectOnce(new Error("CSV contains duplicate column names."));
+          parser.abort();
           return;
         }
 
@@ -846,24 +1450,47 @@ export function parseCsvFile(file: File): Promise<DatasetSummary> {
         );
 
         if (severeError) {
-          reject(new Error(severeError.message || "CSV parsing failed."));
+          rejectOnce(new Error(severeError.message || "CSV parsing failed."));
+          parser.abort();
           return;
         }
 
+        if (!profiler) {
+          const fields =
+            results.meta.fields ?? Object.keys(results.data[0] ?? {});
+          profiler = createCsvProfiler(fields);
+        }
+
+        profiler.fieldErrorCount += results.errors.filter(
+          (error) =>
+            error.code === "TooFewFields" || error.code === "TooManyFields"
+        ).length;
+
+        results.data.forEach((row) => {
+          if (!profiler) return;
+          addProfilerRow(profiler, row);
+        });
+      },
+      complete: () => {
+        if (failed) return;
+
+        const completedProfiler = profiler ?? createCsvProfiler([]);
+
         try {
-          const summary = buildDatasetSummary(file, results.data);
+          const summary = buildDatasetSummary(file, completedProfiler);
+          if (completedProfiler.rowCount > MAX_INFERENCE_ROWS) {
+            summary.warnings.push(
+              `Profiled all ${completedProfiler.rowCount.toLocaleString()} parsed rows.`
+            );
+          }
           if (generatedHeaderCount > 0) {
             summary.warnings.push(
               `${generatedHeaderCount} empty column header${generatedHeaderCount === 1 ? " was" : "s were"} renamed to unnamed columns.`
             );
           }
-          const fieldErrors = results.errors.filter(
-            (error) =>
-              error.code === "TooFewFields" || error.code === "TooManyFields"
-          );
-          if (fieldErrors.length > 0) {
+          if (completedProfiler.fieldErrorCount > 0) {
             summary.warnings.push(
-              `${fieldErrors.length} row${fieldErrors.length === 1 ? "" : "s"} had an inconsistent field count.`
+              `${completedProfiler.fieldErrorCount} row${completedProfiler.fieldErrorCount === 1 ? "" : "s"} had an inconsistent field count.`
             );
           }
           console.info("CSV upload parsed", {
@@ -874,10 +1501,10 @@ export function parseCsvFile(file: File): Promise<DatasetSummary> {
           });
           resolve(summary);
         } catch (error) {
-          reject(error);
+          rejectOnce(error instanceof Error ? error : new Error(String(error)));
         }
       },
-      error: (error) => reject(new Error(error.message))
+      error: (error) => rejectOnce(new Error(error.message))
     });
   });
 }

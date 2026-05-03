@@ -9,12 +9,14 @@ import {
   formatBytes,
   parseCsvFile,
   renderPreviewValue,
+  transformCsvFile,
   validateCsvFile,
   type ColumnSummary,
   type DatasetSummary,
   type ColumnDecision,
   type ColumnPreprocessingPlan,
   type ColumnSelectionPlan,
+  type SelectedPreprocessingStep,
   type PreprocessingSuggestionAction,
   type ProfilingNoteCode
 } from "./csv-profile";
@@ -35,6 +37,7 @@ import {
   CaretUpIcon,
   ChatCircleDotsIcon,
   CheckCircleIcon,
+  DownloadSimpleIcon,
   GearIcon,
   MagnifyingGlassIcon,
   MoonIcon,
@@ -51,7 +54,7 @@ type UploadState =
   | { status: "idle" }
   | { status: "validating"; fileName: string }
   | { status: "parsing"; fileName: string }
-  | { status: "ready"; summary: DatasetSummary }
+  | { status: "ready"; summary: DatasetSummary; file: File }
   | { status: "error"; message: string };
 
 const PREVIEW_VISIBLE_COLUMN_COUNT = 10;
@@ -93,9 +96,17 @@ type PreprocessingReviewState =
   | { status: "ready"; plan: ColumnPreprocessingPlan }
   | { status: "error"; message: string };
 
+type TransformState =
+  | { status: "idle" }
+  | { status: "running" }
+  | { status: "ready"; audit: string[]; rowCount: number; columns: number }
+  | { status: "error"; message: string };
+
 type ColumnPreparationAction = "feature" | "drop" | "review";
 
 type PreprocessingChoice = PreprocessingSuggestionAction;
+
+type PreprocessingChoices = Record<string, PreprocessingChoice[]>;
 
 const COLUMN_FILTERS: Array<{
   key: ColumnFilter;
@@ -324,6 +335,7 @@ function AgentChatSidebar() {
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [datasetContext, setDatasetContext] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -378,6 +390,17 @@ function AgentChatSidebar() {
           }
         });
       }
+      if (
+        "addToolOutput" in event &&
+        event.toolCall.toolName === "getActiveDatasetContext"
+      ) {
+        event.addToolOutput({
+          toolCallId: event.toolCall.toolCallId,
+          output: datasetContext
+            ? { status: "ready", context: datasetContext }
+            : { status: "empty", context: "No CSV is currently loaded." }
+        });
+      }
     }
   });
 
@@ -404,6 +427,17 @@ function AgentChatSidebar() {
         handleExternalMessage
       );
   }, [sendMessage]);
+
+  useEffect(() => {
+    function handleContext(event: Event) {
+      const detail = (event as CustomEvent<{ context?: string | null }>).detail;
+      setDatasetContext(detail?.context ?? null);
+    }
+
+    window.addEventListener("automated-fe:dataset-context", handleContext);
+    return () =>
+      window.removeEventListener("automated-fe:dataset-context", handleContext);
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -869,6 +903,54 @@ ${JSON.stringify(preprocessingPlan, null, 2)}
 When suggesting changes, refer to column names and whether they should be kept, dropped, reviewed, or preprocessed.`;
 }
 
+function buildActiveDatasetContext({
+  summary,
+  targetColumn,
+  columnActions,
+  finalizedFeatureColumns,
+  preprocessingChoices,
+  preprocessingPlan
+}: {
+  summary: DatasetSummary;
+  targetColumn: string | null;
+  columnActions: Record<string, ColumnPreparationAction>;
+  finalizedFeatureColumns: string[] | null;
+  preprocessingChoices: PreprocessingChoices;
+  preprocessingPlan: ColumnPreprocessingPlan | null;
+}) {
+  const featureColumns =
+    finalizedFeatureColumns ??
+    summary.columns
+      .map((column) => column.name)
+      .filter(
+        (columnName) =>
+          columnName !== targetColumn && columnActions[columnName] === "feature"
+      );
+  const droppedColumns = summary.columns
+    .map((column) => column.name)
+    .filter(
+      (columnName) =>
+        columnName !== targetColumn &&
+        !featureColumns.includes(columnName) &&
+        columnActions[columnName] === "drop"
+    );
+
+  return JSON.stringify(
+    {
+      dataset: buildAiReviewProfile(summary),
+      targetColumn,
+      featureColumns,
+      droppedColumns,
+      approvedPreprocessing:
+        buildSelectedPreprocessingSteps(preprocessingChoices),
+      preprocessingSuggestions:
+        preprocessingPlan?.preprocessingSuggestions ?? []
+    },
+    null,
+    2
+  );
+}
+
 function ColumnList({ label, columns }: { label: string; columns: string[] }) {
   return (
     <div className="rounded-lg border border-kumo-line bg-kumo-base p-3">
@@ -1058,6 +1140,51 @@ function getPlanPreprocessingSuggestion(
   };
 }
 
+function getSelectablePreprocessingOptions(
+  suggestion: ReturnType<typeof getPlanPreprocessingSuggestion>,
+  column: ColumnSummary
+) {
+  const options = new Set<PreprocessingChoice>([
+    suggestion.choice,
+    ...suggestion.options,
+    "No step"
+  ]);
+
+  if (column.inferredType === "string") {
+    options.add("Trim whitespace");
+    options.add("Lowercase text");
+  }
+  if (isLikelyNameColumn(column)) {
+    options.add("Split full names into parts");
+  }
+  if (column.inferredType === "boolean") {
+    options.add("Normalize boolean values");
+  }
+  if (hasProfilingNote(column, "missing_like_tokens")) {
+    options.add("Standardize missing-value tokens");
+  }
+  if (column.inferredType === "string" && column.uniqueRatio <= 0.2) {
+    options.add("One-hot encode categories");
+  }
+
+  return Array.from(options);
+}
+
+function selectedNonNoStepChoices(choices: PreprocessingChoice[]) {
+  return choices.filter((choice) => !isNoPreprocessingChoice(choice));
+}
+
+function buildSelectedPreprocessingSteps(
+  choices: PreprocessingChoices
+): SelectedPreprocessingStep[] {
+  return Object.entries(choices).flatMap(([columnName, columnChoices]) =>
+    selectedNonNoStepChoices(columnChoices).map((action) => ({
+      columnName,
+      action
+    }))
+  );
+}
+
 function SelectBox({
   value,
   onChange,
@@ -1092,8 +1219,10 @@ function PreparationReviewPanel({
   columnActions,
   finalizedFeatureColumns,
   preprocessingChoices,
+  transformState,
   onGenerate,
   onGeneratePreprocessing,
+  onDownloadTransformed,
   onAcceptTarget,
   onTargetChange,
   onFinishSelection,
@@ -1107,9 +1236,11 @@ function PreparationReviewPanel({
   targetColumn: string | null;
   columnActions: Record<string, ColumnPreparationAction>;
   finalizedFeatureColumns: string[] | null;
-  preprocessingChoices: Record<string, PreprocessingChoice>;
+  preprocessingChoices: PreprocessingChoices;
+  transformState: TransformState;
   onGenerate: () => void;
   onGeneratePreprocessing: () => void;
+  onDownloadTransformed: () => void;
   onAcceptTarget: (columnName: string) => void;
   onTargetChange: (columnName: string) => void;
   onFinishSelection: () => void;
@@ -1119,7 +1250,8 @@ function PreparationReviewPanel({
   ) => void;
   onPreprocessingChoiceChange: (
     columnName: string,
-    choice: PreprocessingChoice
+    choice: PreprocessingChoice,
+    checked: boolean
   ) => void;
   onSendToChat: () => void;
 }) {
@@ -1152,7 +1284,10 @@ function PreparationReviewPanel({
       targetColumn
     );
     const selectedPreprocessing =
-      preprocessingChoices[column.name] ?? suggestedPreprocessing.choice;
+      preprocessingChoices[column.name] ??
+      (isNoPreprocessingChoice(suggestedPreprocessing.choice)
+        ? []
+        : [suggestedPreprocessing.choice]);
 
     return {
       column,
@@ -1179,7 +1314,7 @@ function PreparationReviewPanel({
     (item) =>
       item.column.name !== targetColumn &&
       item.selectedAction === "feature" &&
-      !isNoPreprocessingChoice(item.selectedPreprocessing)
+      selectedNonNoStepChoices(item.selectedPreprocessing).length > 0
   );
   const workflowSteps = [
     {
@@ -1554,28 +1689,40 @@ function PreparationReviewPanel({
                               </div>
                             </td>
                             <td className="px-3 py-2">
-                              <SelectBox
-                                value={selectedPreprocessing}
-                                ariaLabel={`Set preprocessing for ${column.name}`}
-                                onChange={(value) =>
-                                  onPreprocessingChoiceChange(
-                                    column.name,
-                                    value as PreprocessingChoice
-                                  )
-                                }
-                              >
-                                {Array.from(
-                                  new Set([
-                                    selectedPreprocessing,
-                                    ...suggestedPreprocessing.options,
-                                    "No step"
-                                  ])
-                                ).map((choice) => (
-                                  <option key={choice} value={choice}>
-                                    {preprocessingChoiceLabel(choice)}
-                                  </option>
-                                ))}
-                              </SelectBox>
+                              <div className="grid min-w-56 gap-1">
+                                {getSelectablePreprocessingOptions(
+                                  suggestedPreprocessing,
+                                  column
+                                ).map((choice) => {
+                                  const checked =
+                                    !isNoPreprocessingChoice(choice) &&
+                                    selectedPreprocessing.includes(choice);
+                                  return (
+                                    <label
+                                      key={choice}
+                                      className="flex items-center gap-2 text-xs text-kumo-subtle"
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        disabled={isNoPreprocessingChoice(
+                                          choice
+                                        )}
+                                        onChange={(event) =>
+                                          onPreprocessingChoiceChange(
+                                            column.name,
+                                            choice,
+                                            event.target.checked
+                                          )
+                                        }
+                                      />
+                                      <span>
+                                        {preprocessingChoiceLabel(choice)}
+                                      </span>
+                                    </label>
+                                  );
+                                })}
+                              </div>
                             </td>
                           </tr>
                         ) : null
@@ -1616,7 +1763,9 @@ function PreparationReviewPanel({
                       className="text-xs text-kumo-subtle"
                     >
                       {item.column.name}:{" "}
-                      {preprocessingChoiceLabel(item.selectedPreprocessing)}
+                      {selectedNonNoStepChoices(item.selectedPreprocessing)
+                        .map(preprocessingChoiceLabel)
+                        .join(", ")}
                     </li>
                   ))}
                 </ul>
@@ -1626,6 +1775,56 @@ function PreparationReviewPanel({
                 </Text>
               )}
             </div>
+            <div className="mt-3 flex flex-col gap-2 border-t border-kumo-line pt-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <Text size="xs" variant="secondary">
+                  Export
+                </Text>
+                <Text size="sm" bold>
+                  Target stays unchanged; transforms apply only to kept
+                  features.
+                </Text>
+                {transformState.status === "error" && (
+                  <Text size="xs">{transformState.message}</Text>
+                )}
+                {transformState.status === "ready" && (
+                  <Text size="xs" variant="secondary">
+                    Downloaded {transformState.rowCount.toLocaleString()} rows
+                    with {transformState.columns.toLocaleString()} columns.
+                  </Text>
+                )}
+              </div>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                icon={<DownloadSimpleIcon size={14} />}
+                disabled={
+                  !targetColumn ||
+                  !isSelectionFinalized ||
+                  transformState.status === "running"
+                }
+                onClick={onDownloadTransformed}
+              >
+                {transformState.status === "running"
+                  ? "Preparing"
+                  : "Download transformed CSV"}
+              </Button>
+            </div>
+            {transformState.status === "ready" && (
+              <div className="mt-3 rounded-lg border border-kumo-line bg-kumo-base p-3">
+                <Text size="xs" variant="secondary">
+                  Leakage audit
+                </Text>
+                <ul className="mt-2 grid gap-1">
+                  {transformState.audit.map((item) => (
+                    <li key={item} className="text-xs text-kumo-subtle">
+                      {item}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
           </div>
         </>
       )}
@@ -1684,6 +1883,9 @@ function DatasetWorkspace() {
     useState<PreprocessingReviewState>({
       status: "idle"
     });
+  const [transformState, setTransformState] = useState<TransformState>({
+    status: "idle"
+  });
   const [targetColumn, setTargetColumn] = useState<string | null>(null);
   const [columnActions, setColumnActions] = useState<
     Record<string, ColumnPreparationAction>
@@ -1691,12 +1893,12 @@ function DatasetWorkspace() {
   const [finalizedFeatureColumns, setFinalizedFeatureColumns] = useState<
     string[] | null
   >(null);
-  const [preprocessingChoices, setPreprocessingChoices] = useState<
-    Record<string, PreprocessingChoice>
-  >({});
+  const [preprocessingChoices, setPreprocessingChoices] =
+    useState<PreprocessingChoices>({});
 
   const currentSummary =
     uploadState.status === "ready" ? uploadState.summary : null;
+  const currentFile = uploadState.status === "ready" ? uploadState.file : null;
   const columnQualityCounts = useMemo(() => {
     const columns = currentSummary?.columns ?? [];
 
@@ -1767,10 +1969,40 @@ function DatasetWorkspace() {
     }));
   }, []);
 
+  useEffect(() => {
+    const context = currentSummary
+      ? buildActiveDatasetContext({
+          summary: currentSummary,
+          targetColumn,
+          columnActions,
+          finalizedFeatureColumns,
+          preprocessingChoices,
+          preprocessingPlan:
+            preprocessingReviewState.status === "ready"
+              ? preprocessingReviewState.plan
+              : null
+        })
+      : null;
+
+    window.dispatchEvent(
+      new CustomEvent("automated-fe:dataset-context", {
+        detail: { context }
+      })
+    );
+  }, [
+    columnActions,
+    currentSummary,
+    finalizedFeatureColumns,
+    preprocessingChoices,
+    preprocessingReviewState,
+    targetColumn
+  ]);
+
   const resetWorkspace = useCallback(() => {
     setUploadState({ status: "idle" });
     setAiReviewState({ status: "idle" });
     setPreprocessingReviewState({ status: "idle" });
+    setTransformState({ status: "idle" });
     setTargetColumn(null);
     setColumnActions({});
     setFinalizedFeatureColumns(null);
@@ -1785,6 +2017,7 @@ function DatasetWorkspace() {
 
     setAiReviewState({ status: "loading" });
     setPreprocessingReviewState({ status: "idle" });
+    setTransformState({ status: "idle" });
     setFinalizedFeatureColumns(null);
     try {
       const response = await fetch("/api/column-selection", {
@@ -1863,6 +2096,7 @@ function DatasetWorkspace() {
 
   const acceptTarget = useCallback((columnName: string) => {
     setPreprocessingReviewState({ status: "idle" });
+    setTransformState({ status: "idle" });
     setFinalizedFeatureColumns(null);
     setPreprocessingChoices({});
     setTargetColumn(columnName);
@@ -1872,12 +2106,13 @@ function DatasetWorkspace() {
     }));
     setPreprocessingChoices((current) => ({
       ...current,
-      [columnName]: "No step"
+      [columnName]: []
     }));
   }, []);
 
   const changeTarget = useCallback((columnName: string) => {
     setPreprocessingReviewState({ status: "idle" });
+    setTransformState({ status: "idle" });
     setFinalizedFeatureColumns(null);
     setPreprocessingChoices({});
     setTargetColumn(columnName || null);
@@ -1888,7 +2123,7 @@ function DatasetWorkspace() {
     }));
     setPreprocessingChoices((current) => ({
       ...current,
-      [columnName]: "No step"
+      [columnName]: []
     }));
   }, []);
 
@@ -1899,11 +2134,12 @@ function DatasetWorkspace() {
         [columnName]: action
       }));
       setPreprocessingReviewState({ status: "idle" });
+      setTransformState({ status: "idle" });
       setFinalizedFeatureColumns(null);
       if (action === "drop") {
         setPreprocessingChoices((current) => ({
           ...current,
-          [columnName]: "No step"
+          [columnName]: []
         }));
       }
     },
@@ -1922,6 +2158,7 @@ function DatasetWorkspace() {
 
     setFinalizedFeatureColumns(keptColumns);
     setPreprocessingReviewState({ status: "idle" });
+    setTransformState({ status: "idle" });
     setPreprocessingChoices({});
     toasts.add({
       title: "Column selection finished",
@@ -1932,11 +2169,19 @@ function DatasetWorkspace() {
   }, [columnActions, currentSummary, targetColumn, toasts]);
 
   const changePreprocessingChoice = useCallback(
-    (columnName: string, choice: PreprocessingChoice) => {
-      setPreprocessingChoices((current) => ({
-        ...current,
-        [columnName]: choice
-      }));
+    (columnName: string, choice: PreprocessingChoice, checked: boolean) => {
+      setTransformState({ status: "idle" });
+      setPreprocessingChoices((current) => {
+        const existing = current[columnName] ?? [];
+        const nextChoices = checked
+          ? Array.from(new Set([...existing, choice]))
+          : existing.filter((item) => item !== choice);
+
+        return {
+          ...current,
+          [columnName]: nextChoices
+        };
+      });
       if (isDropPreprocessingChoice(choice)) {
         setColumnActions((current) => ({
           ...current,
@@ -1946,6 +2191,71 @@ function DatasetWorkspace() {
     },
     []
   );
+
+  const downloadTransformedDataset = useCallback(async () => {
+    if (!currentFile || !currentSummary || !targetColumn) return;
+
+    const featureColumns =
+      finalizedFeatureColumns ??
+      currentSummary.columns
+        .map((column) => column.name)
+        .filter(
+          (columnName) =>
+            columnName !== targetColumn &&
+            columnActions[columnName] === "feature"
+        );
+    const preprocessingSteps = buildSelectedPreprocessingSteps(
+      preprocessingChoices
+    ).filter((step) => featureColumns.includes(step.columnName));
+
+    setTransformState({ status: "running" });
+    try {
+      const transformed = await transformCsvFile(currentFile, {
+        targetColumn,
+        featureColumns,
+        preprocessingSteps
+      });
+      const blob = new Blob([transformed.csv], {
+        type: "text/csv;charset=utf-8"
+      });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      const baseName = currentSummary.fileName.replace(/\.csv$/i, "");
+
+      link.href = url;
+      link.download = `${baseName || "dataset"}-transformed.csv`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+      setTransformState({
+        status: "ready",
+        audit: transformed.audit,
+        rowCount: transformed.rowCount,
+        columns: transformed.outputColumns.length
+      });
+      toasts.add({
+        title: "Transformed CSV ready",
+        description: `${transformed.rowCount.toLocaleString()} rows exported.`
+      });
+    } catch (error) {
+      setTransformState({
+        status: "error",
+        message:
+          error instanceof Error
+            ? error.message
+            : "The transformed CSV could not be generated."
+      });
+    }
+  }, [
+    columnActions,
+    currentFile,
+    currentSummary,
+    finalizedFeatureColumns,
+    preprocessingChoices,
+    targetColumn,
+    toasts
+  ]);
 
   const generatePreprocessingReview = useCallback(async () => {
     if (!currentSummary || !targetColumn) return;
@@ -1961,6 +2271,7 @@ function DatasetWorkspace() {
         );
 
     setPreprocessingReviewState({ status: "loading" });
+    setTransformState({ status: "idle" });
     try {
       const response = await fetch("/api/preprocessing-review", {
         method: "POST",
@@ -1988,7 +2299,12 @@ function DatasetWorkspace() {
             const suggestion = plan.preprocessingSuggestions.find(
               (item) => item.columnName === columnName
             );
-            return [columnName, suggestion?.action ?? "No step"];
+            return [
+              columnName,
+              suggestion && !isNoPreprocessingChoice(suggestion.action)
+                ? [suggestion.action]
+                : []
+            ];
           })
         )
       );
@@ -2022,6 +2338,7 @@ function DatasetWorkspace() {
         if (!replace) return;
         setAiReviewState({ status: "idle" });
         setPreprocessingReviewState({ status: "idle" });
+        setTransformState({ status: "idle" });
         setTargetColumn(null);
         setColumnActions({});
         setFinalizedFeatureColumns(null);
@@ -2038,9 +2355,10 @@ function DatasetWorkspace() {
       setUploadState({ status: "parsing", fileName: file.name });
       try {
         const summary = await parseCsvFile(file);
-        setUploadState({ status: "ready", summary });
+        setUploadState({ status: "ready", summary, file });
         setAiReviewState({ status: "idle" });
         setPreprocessingReviewState({ status: "idle" });
+        setTransformState({ status: "idle" });
         setTargetColumn(null);
         setColumnActions({});
         setFinalizedFeatureColumns(null);
@@ -2242,8 +2560,10 @@ function DatasetWorkspace() {
               columnActions={columnActions}
               finalizedFeatureColumns={finalizedFeatureColumns}
               preprocessingChoices={preprocessingChoices}
+              transformState={transformState}
               onGenerate={() => void generateAiReview()}
               onGeneratePreprocessing={() => void generatePreprocessingReview()}
+              onDownloadTransformed={() => void downloadTransformedDataset()}
               onAcceptTarget={acceptTarget}
               onTargetChange={changeTarget}
               onFinishSelection={finishColumnSelection}
