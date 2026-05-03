@@ -4,7 +4,16 @@ import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { MCPServersState } from "agents";
 import type { ChatAgent } from "./server";
-import Papa from "papaparse";
+import {
+  MAX_CSV_SIZE_BYTES,
+  describePreprocessingStep,
+  formatBytes,
+  parseCsvFile,
+  renderPreviewValue,
+  validateCsvFile,
+  type DatasetSummary,
+  type PreprocessingStatus
+} from "./csv-profile";
 import {
   Badge,
   Button,
@@ -40,36 +49,6 @@ import {
   ImageIcon
 } from "@phosphor-icons/react";
 
-const MAX_CSV_SIZE_BYTES = 10 * 1024 * 1024;
-const MAX_INFERENCE_ROWS = 1000;
-const MAX_PREVIEW_ROWS = 20;
-
-type InferredColumnType =
-  | "string"
-  | "number"
-  | "boolean"
-  | "date"
-  | "empty"
-  | "mixed";
-
-type PreviewValue = string | number | boolean | null;
-
-interface ColumnSummary {
-  name: string;
-  inferredType: InferredColumnType;
-  missingCount: number;
-  sampleValues: string[];
-}
-
-interface DatasetSummary {
-  fileName: string;
-  fileSizeBytes: number;
-  parsedRowCount: number;
-  columns: ColumnSummary[];
-  previewRows: Record<string, PreviewValue>[];
-  warnings: string[];
-}
-
 type UploadState =
   | { status: "idle" }
   | { status: "validating"; fileName: string }
@@ -101,189 +80,6 @@ function fileToDataUri(file: File): Promise<string> {
     reader.onload = () => resolve(reader.result as string);
     reader.onerror = reject;
     reader.readAsDataURL(file);
-  });
-}
-
-// ── CSV upload helpers ────────────────────────────────────────────────
-
-function formatBytes(bytes: number) {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
-function validateCsvFile(file: File): string | null {
-  if (!file.name.toLowerCase().endsWith(".csv")) {
-    return "Select a .csv file.";
-  }
-  if (file.size === 0) {
-    return "The CSV file is empty.";
-  }
-  if (file.size > MAX_CSV_SIZE_BYTES) {
-    return `The CSV file is ${formatBytes(file.size)}. The MVP limit is ${formatBytes(MAX_CSV_SIZE_BYTES)}.`;
-  }
-  return null;
-}
-
-function isMissing(value: unknown) {
-  return value == null || String(value).trim() === "";
-}
-
-function looksBoolean(value: string) {
-  return /^(true|false|0|1|yes|no)$/i.test(value.trim());
-}
-
-function looksNumber(value: string) {
-  if (value.trim() === "") return false;
-  return Number.isFinite(Number(value));
-}
-
-function looksDate(value: string) {
-  const trimmed = value.trim();
-  if (!trimmed || looksNumber(trimmed)) return false;
-  const timestamp = Date.parse(trimmed);
-  return Number.isFinite(timestamp);
-}
-
-function inferColumnType(values: string[]): InferredColumnType {
-  const present = values.filter((value) => !isMissing(value));
-  if (present.length === 0) return "empty";
-
-  const checks: Array<[InferredColumnType, (value: string) => boolean]> = [
-    ["number", looksNumber],
-    ["boolean", looksBoolean],
-    ["date", looksDate]
-  ];
-
-  for (const [type, check] of checks) {
-    if (present.every(check)) return type;
-  }
-
-  const hasStructuredSignal = present.some(
-    (value) => looksNumber(value) || looksBoolean(value) || looksDate(value)
-  );
-  return hasStructuredSignal ? "mixed" : "string";
-}
-
-function normalizePreviewValue(value: unknown): PreviewValue {
-  if (isMissing(value)) return null;
-  return String(value);
-}
-
-function buildDatasetSummary(file: File, rows: Record<string, unknown>[]) {
-  const firstRow = rows[0];
-  const fields = firstRow ? Object.keys(firstRow) : [];
-  const warnings: string[] = [];
-
-  if (fields.length === 0) {
-    throw new Error("CSV has no usable header row.");
-  }
-
-  if (rows.length === 0) {
-    throw new Error("CSV has no data rows.");
-  }
-
-  if (rows.length >= MAX_INFERENCE_ROWS) {
-    warnings.push(
-      `Schema was inferred from the first ${MAX_INFERENCE_ROWS.toLocaleString()} rows.`
-    );
-  }
-
-  const columns = fields.map((field) => {
-    const values = rows.map((row) => String(row[field] ?? ""));
-    const uniqueSamples = Array.from(
-      new Set(values.filter((value) => !isMissing(value)).slice(0, 10))
-    ).slice(0, 5);
-
-    return {
-      name: field,
-      inferredType: inferColumnType(values),
-      missingCount: values.filter(isMissing).length,
-      sampleValues: uniqueSamples
-    };
-  });
-
-  return {
-    fileName: file.name,
-    fileSizeBytes: file.size,
-    parsedRowCount: rows.length,
-    columns,
-    previewRows: rows
-      .slice(0, MAX_PREVIEW_ROWS)
-      .map((row) =>
-        Object.fromEntries(
-          fields.map((field) => [field, normalizePreviewValue(row[field])])
-        )
-      ),
-    warnings
-  } satisfies DatasetSummary;
-}
-
-function parseCsvFile(file: File): Promise<DatasetSummary> {
-  return new Promise((resolve, reject) => {
-    let generatedHeaderCount = 0;
-
-    Papa.parse<Record<string, unknown>>(file, {
-      header: true,
-      preview: MAX_INFERENCE_ROWS,
-      skipEmptyLines: true,
-      transformHeader: (header, index) => {
-        const trimmed = header.trim();
-        if (trimmed) return trimmed;
-        generatedHeaderCount += 1;
-        return `unnamed_${index + 1}`;
-      },
-      complete: (results) => {
-        const renamedHeaders = (
-          results.meta as Papa.ParseMeta & {
-            renamedHeaders?: Record<string, string>;
-          }
-        ).renamedHeaders;
-
-        if (renamedHeaders && Object.keys(renamedHeaders).length > 0) {
-          reject(new Error("CSV contains duplicate column names."));
-          return;
-        }
-
-        const severeError = results.errors.find(
-          (error) =>
-            error.code !== "TooFewFields" && error.code !== "TooManyFields"
-        );
-
-        if (severeError) {
-          reject(new Error(severeError.message || "CSV parsing failed."));
-          return;
-        }
-
-        try {
-          const summary = buildDatasetSummary(file, results.data);
-          if (generatedHeaderCount > 0) {
-            summary.warnings.push(
-              `${generatedHeaderCount} empty column header${generatedHeaderCount === 1 ? " was" : "s were"} renamed to unnamed columns.`
-            );
-          }
-          const fieldErrors = results.errors.filter(
-            (error) =>
-              error.code === "TooFewFields" || error.code === "TooManyFields"
-          );
-          if (fieldErrors.length > 0) {
-            summary.warnings.push(
-              `${fieldErrors.length} row${fieldErrors.length === 1 ? "" : "s"} had an inconsistent field count.`
-            );
-          }
-          console.info("CSV upload parsed", {
-            fileName: summary.fileName,
-            fileSizeBytes: summary.fileSizeBytes,
-            parsedRowCount: summary.parsedRowCount,
-            columns: summary.columns.length
-          });
-          resolve(summary);
-        } catch (error) {
-          reject(error);
-        }
-      },
-      error: (error) => reject(new Error(error.message))
-    });
   });
 }
 
@@ -453,6 +249,9 @@ function Chat() {
   });
   const [selectedTarget, setSelectedTarget] = useState("");
   const [confirmedTarget, setConfirmedTarget] = useState("");
+  const [preprocessingStatuses, setPreprocessingStatuses] = useState<
+    Record<string, PreprocessingStatus>
+  >({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -660,6 +459,7 @@ function Chat() {
     setUploadState({ status: "idle" });
     setSelectedTarget("");
     setConfirmedTarget("");
+    setPreprocessingStatuses({});
     if (csvInputRef.current) csvInputRef.current.value = "";
   }, []);
 
@@ -672,6 +472,7 @@ function Chat() {
         if (!replace) return;
         setSelectedTarget("");
         setConfirmedTarget("");
+        setPreprocessingStatuses({});
       }
 
       setUploadState({ status: "validating", fileName: file.name });
@@ -687,6 +488,7 @@ function Chat() {
         setUploadState({ status: "ready", summary });
         setSelectedTarget("");
         setConfirmedTarget("");
+        setPreprocessingStatuses({});
       } catch (error) {
         setUploadState({
           status: "error",
@@ -724,6 +526,17 @@ function Chat() {
   const currentSummary =
     uploadState.status === "ready" ? uploadState.summary : null;
   const canConfirmTarget = Boolean(currentSummary && selectedTarget);
+  const proposedPreprocessingSteps =
+    currentSummary?.proposedPreprocessingSteps ?? [];
+  const updatePreprocessingStatus = useCallback(
+    (stepId: string, status: PreprocessingStatus) => {
+      setPreprocessingStatuses((current) => ({
+        ...current,
+        [stepId]: status
+      }));
+    },
+    []
+  );
 
   return (
     <div
@@ -1095,6 +908,84 @@ function Chat() {
                     </div>
                   )}
 
+                  {proposedPreprocessingSteps.length > 0 && (
+                    <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 p-3">
+                      <div className="mb-3">
+                        <Text size="sm" bold>
+                          Preprocessing recommendations
+                        </Text>
+                        <Text size="xs" variant="secondary">
+                          Raw values are unchanged. Accepting a recommendation
+                          records intent for the preprocessing pipeline.
+                        </Text>
+                      </div>
+                      <div className="grid gap-2">
+                        {proposedPreprocessingSteps.map((step) => {
+                          const details = describePreprocessingStep(step);
+                          const status =
+                            preprocessingStatuses[step.id] ?? step.status;
+
+                          return (
+                            <div
+                              key={step.id}
+                              className="flex flex-col gap-2 rounded-lg border border-kumo-line bg-kumo-base p-3 sm:flex-row sm:items-center sm:justify-between"
+                            >
+                              <div>
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <Text size="sm" bold>
+                                    {details.title}
+                                  </Text>
+                                  <Badge
+                                    variant={
+                                      status === "accepted"
+                                        ? "primary"
+                                        : "secondary"
+                                    }
+                                  >
+                                    {status}
+                                  </Badge>
+                                </div>
+                                <Text size="xs" variant="secondary">
+                                  {details.description}
+                                </Text>
+                              </div>
+                              <div className="flex gap-2">
+                                <Button
+                                  type="button"
+                                  variant="primary"
+                                  size="sm"
+                                  disabled={status === "accepted"}
+                                  onClick={() =>
+                                    updatePreprocessingStatus(
+                                      step.id,
+                                      "accepted"
+                                    )
+                                  }
+                                >
+                                  Accept
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="secondary"
+                                  size="sm"
+                                  disabled={status === "rejected"}
+                                  onClick={() =>
+                                    updatePreprocessingStatus(
+                                      step.id,
+                                      "rejected"
+                                    )
+                                  }
+                                >
+                                  Reject
+                                </Button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="overflow-auto rounded-lg border border-kumo-line">
                     <table className="min-w-full text-left text-sm">
                       <thead className="bg-kumo-elevated text-kumo-subtle">
@@ -1103,6 +994,7 @@ function Chat() {
                           <th className="px-3 py-2 font-medium">Type</th>
                           <th className="px-3 py-2 font-medium">Missing</th>
                           <th className="px-3 py-2 font-medium">Samples</th>
+                          <th className="px-3 py-2 font-medium">Notes</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-kumo-line">
@@ -1126,6 +1018,19 @@ function Chat() {
                               {column.sampleValues.length > 0
                                 ? column.sampleValues.join(", ")
                                 : "No non-empty samples"}
+                            </td>
+                            <td className="px-3 py-2 text-kumo-subtle">
+                              {column.profilingNotes.length > 0 ? (
+                                <div className="grid gap-1">
+                                  {column.profilingNotes.map((note) => (
+                                    <span key={note.code}>
+                                      {note.message} ({note.affectedCount})
+                                    </span>
+                                  ))}
+                                </div>
+                              ) : (
+                                "No notes"
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -1159,9 +1064,7 @@ function Chat() {
                                   key={column.name}
                                   className="max-w-52 truncate px-3 py-2 text-kumo-subtle"
                                 >
-                                  {row[column.name] == null
-                                    ? "NULL"
-                                    : String(row[column.name])}
+                                  {renderPreviewValue(row[column.name])}
                                 </td>
                               ))}
                             </tr>
