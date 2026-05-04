@@ -1143,6 +1143,10 @@ async function handleAiReview(request: Request, env: Env) {
       "You review compact CSV profiles for preprocessing planning. You output JSON only.",
     prompt: buildReviewPrompt(profile)
   });
+  if (!result || typeof result.text !== "string") {
+    console.warn("AI review call returned no text", { result });
+    return Response.json(buildFallbackPreprocessingPlan(profile));
+  }
   const parsedReview = parseLlmReviewText(result.text);
 
   if (!parsedReview.success) {
@@ -1161,14 +1165,20 @@ async function handleAiReview(request: Request, env: Env) {
       "You suggest CSV preprocessing steps. You output one JSON object only.",
     prompt: buildPreprocessingPrompt(profile, parsedReview.review)
   });
-  const parsedPreprocessing = parseLlmPreprocessingText(
-    preprocessingResult.text
-  );
+  let parsedPreprocessing: ReturnType<typeof parseLlmPreprocessingText> = {
+    success: false as const,
+    error: "AI preprocessing call returned no text"
+  };
+  if (preprocessingResult && typeof preprocessingResult.text === "string") {
+    parsedPreprocessing = parseLlmPreprocessingText(preprocessingResult.text);
+  } else {
+    console.warn("AI preprocessing call returned no text", { preprocessingResult });
+  }
 
   if (!parsedPreprocessing.success) {
     console.warn("AI preprocessing response could not be parsed", {
       error: parsedPreprocessing.error,
-      generatedText: preprocessingResult.text.slice(0, 500)
+      generatedText: preprocessingResult?.text?.slice(0, 500)
     });
   }
 
@@ -1213,6 +1223,10 @@ async function handleColumnSelection(request: Request, env: Env) {
       "You decide which CSV columns should be kept before preprocessing. You output JSON only.",
     prompt: buildColumnSelectionPrompt(profile)
   });
+  if (!result || typeof result.text !== "string") {
+    console.warn("AI column selection call returned no text", { result });
+    return Response.json(buildFallbackColumnSelectionPlan(profile));
+  }
   const parsedPlan = parseColumnSelectionText(result.text);
 
   if (!parsedPlan.success) {
@@ -1264,12 +1278,20 @@ async function handlePreprocessingReview(request: Request, env: Env) {
       keptColumns: sanitizedKeptColumns
     })
   });
-  const parsedPreprocessing = parseLlmPreprocessingText(result.text);
+  let parsedPreprocessing: ReturnType<typeof parseLlmPreprocessingText> = {
+    success: false as const,
+    error: "AI call returned no text"
+  };
+  if (result && typeof result.text === "string") {
+    parsedPreprocessing = parseLlmPreprocessingText(result.text);
+  } else {
+    console.warn("AI column preprocessing call returned no text", { result });
+  }
 
   if (!parsedPreprocessing.success) {
     console.warn("AI preprocessing response could not be parsed", {
       error: parsedPreprocessing.error,
-      generatedText: result.text.slice(0, 500)
+      generatedText: result?.text?.slice(0, 500)
     });
 
     return Response.json(
@@ -1282,7 +1304,7 @@ async function handlePreprocessingReview(request: Request, env: Env) {
   }
 
   const suggestionsByColumn = new Map(
-    parsedPreprocessing.review.preprocessingSuggestions.map((suggestion) => [
+    parsedPreprocessing.review.preprocessingSuggestions.map((suggestion: any) => [
       suggestion.columnName,
       suggestion
     ])
