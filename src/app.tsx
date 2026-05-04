@@ -64,8 +64,6 @@ type UploadState =
     }
   | { status: "error"; message: string };
 
-const PREVIEW_VISIBLE_COLUMN_COUNT = 10;
-
 type ColumnFilter =
   | "all"
   | "has_notes"
@@ -269,7 +267,7 @@ function ToolPartView({
       <div className="rounded-md border border-kumo-warning/50 bg-kumo-warning/10 px-3 py-2">
         <div className="mb-2 flex items-center gap-2">
           <GearIcon size={14} className="text-kumo-warning" />
-          <Text size="xs" bold>
+          <Text size="base" bold>
             Approval needed: {toolName}
           </Text>
         </div>
@@ -534,8 +532,8 @@ function AgentChatSidebar() {
 
   return (
     <Surface
-      className={`flex h-[calc(100vh-7.5rem)] min-h-[560px] flex-col overflow-hidden rounded-xl ring transition-colors lg:sticky lg:top-5 ${
-        isDragging ? "bg-kumo-brand/5 ring-2 ring-kumo-brand" : "ring-kumo-line"
+      className={`flex flex-col overflow-hidden rounded-2xl border border-kumo-line bg-kumo-elevated/50 backdrop-blur-sm transition-all shadow-sm lg:sticky lg:top-24 lg:h-[calc(100vh-8rem)] ${
+        isDragging ? "ring-2 ring-kumo-brand bg-kumo-brand/5" : ""
       }`}
       onDragOver={(event) => {
         event.preventDefault();
@@ -555,28 +553,30 @@ function AgentChatSidebar() {
           addFiles(event.dataTransfer.files);
       }}
     >
-      <div className="border-b border-kumo-line px-4 py-3">
+      <div className="border-b border-kumo-line px-5 py-4 bg-kumo-base/30">
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <ChatCircleDotsIcon size={18} />
+              <ChatCircleDotsIcon size={20} className="text-kumo-brand" />
               <Text size="sm" bold>
-                Agent chat
+                Agent Assistant
               </Text>
               <span
                 className={`h-2 w-2 rounded-full ${
-                  connected ? "bg-kumo-success" : "bg-kumo-inactive"
+                  connected
+                    ? "bg-kumo-success animate-pulse"
+                    : "bg-kumo-inactive"
                 }`}
                 aria-label={connected ? "Connected" : "Disconnected"}
               />
             </div>
-            <Text size="xs" variant="secondary">
-              Ask about datasets, preprocessing, and follow-up tasks.
+            <Text size="xs" variant="secondary" DANGEROUS_className="mt-0.5">
+              Discuss preprocessing and data insights.
             </Text>
           </div>
           <Button
             type="button"
-            variant="secondary"
+            variant="ghost"
             size="sm"
             shape="square"
             icon={<TrashIcon size={14} />}
@@ -587,22 +587,21 @@ function AgentChatSidebar() {
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-4">
+      <div className="flex-1 overflow-y-auto px-5 py-6 scrollbar-thin scrollbar-thumb-kumo-line scrollbar-track-transparent">
         {messages.length === 0 ? (
-          <div className="grid gap-3">
+          <div className="flex flex-col h-full justify-center">
             <Empty
-              icon={<ChatCircleDotsIcon size={28} />}
-              title="No conversation yet"
-              contents="Use the agent as a compact workspace companion."
+              icon={<BrainIcon size={32} className="text-kumo-brand/50" />}
+              title="Start a conversation"
+              contents="Ask about your dataset features, or request a summary of the current plan."
             />
-            <div className="grid gap-2">
+            <div className="grid gap-2 mt-8">
               {promptSuggestions.map((prompt) => (
-                <Button
+                <button
                   key={prompt}
                   type="button"
-                  variant="secondary"
-                  size="sm"
                   disabled={!connected || isStreaming}
+                  className="text-left px-4 py-2 rounded-xl border border-kumo-line bg-kumo-base hover:border-kumo-brand/40 hover:bg-kumo-brand/5 transition-all text-xs text-kumo-subtle hover:text-kumo-default"
                   onClick={() =>
                     sendMessage({
                       role: "user",
@@ -611,19 +610,19 @@ function AgentChatSidebar() {
                   }
                 >
                   {prompt}
-                </Button>
+                </button>
               ))}
             </div>
           </div>
         ) : (
-          <div className="grid gap-4">
+          <div className="grid gap-6">
             {messages.map((message: UIMessage, index) => {
               const isUser = message.role === "user";
               const isLastAssistant =
                 message.role === "assistant" && index === messages.length - 1;
 
               return (
-                <div key={message.id} className="grid gap-2">
+                <div key={message.id} className="grid gap-3">
                   {message.parts.filter(isToolUIPart).map((part) => (
                     <ToolPartView
                       key={part.toolCallId}
@@ -649,19 +648,19 @@ function AgentChatSidebar() {
                       return (
                         <details
                           key={partIndex}
-                          className="rounded-md border border-kumo-line bg-kumo-elevated"
+                          className="rounded-xl border border-kumo-line bg-kumo-base/50"
                           open={!isDone}
                         >
-                          <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-xs text-kumo-subtle">
-                            <BrainIcon size={14} />
-                            Reasoning
-                            <Badge variant="secondary">
-                              {isDone ? "Done" : "Thinking"}
-                            </Badge>
+                          <summary className="flex cursor-pointer items-center gap-2 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-kumo-inactive hover:text-kumo-subtle transition-colors">
+                            <BrainIcon size={12} />
+                            Agent Thought Process
+                            <span className="ml-auto opacity-50">
+                              {isDone ? "Done" : "Thinking..."}
+                            </span>
                           </summary>
-                          <pre className="max-h-40 overflow-auto whitespace-pre-wrap px-3 pb-3 text-xs text-kumo-subtle">
+                          <div className="px-4 pb-4 text-xs text-kumo-subtle leading-relaxed italic border-t border-kumo-line/30 pt-3">
                             {reasoning.text}
-                          </pre>
+                          </div>
                         </details>
                       );
                     })}
@@ -682,7 +681,7 @@ function AgentChatSidebar() {
                         <img
                           src={part.url}
                           alt="Attachment"
-                          className="max-h-48 max-w-[85%] rounded-lg border border-kumo-line object-contain"
+                          className="max-h-48 max-w-[85%] rounded-2xl border border-kumo-line shadow-sm object-contain"
                         />
                       </div>
                     ))}
@@ -700,13 +699,13 @@ function AgentChatSidebar() {
                           className={`flex ${isUser ? "justify-end" : "justify-start"}`}
                         >
                           {isUser ? (
-                            <div className="max-w-[88%] rounded-lg rounded-br-sm bg-kumo-contrast px-3 py-2 text-sm leading-relaxed text-kumo-inverse">
+                            <div className="max-w-[85%] rounded-2xl rounded-tr-none bg-kumo-brand px-4 py-2.5 text-sm leading-relaxed text-kumo-inverse shadow-sm">
                               {text}
                             </div>
                           ) : (
-                            <div className="max-w-[92%] rounded-lg rounded-bl-sm border border-kumo-line bg-kumo-elevated text-sm leading-relaxed text-kumo-default">
+                            <div className="max-w-[90%] rounded-2xl rounded-tl-none border border-kumo-line bg-kumo-base px-1 py-1 text-sm leading-relaxed text-kumo-default shadow-sm overflow-hidden">
                               <Streamdown
-                                className="sd-theme rounded-lg p-3"
+                                className="sd-theme p-3"
                                 plugins={{ code }}
                                 controls={false}
                                 isAnimating={isLastAssistant && isStreaming}
@@ -727,7 +726,7 @@ function AgentChatSidebar() {
       </div>
 
       <form
-        className="border-t border-kumo-line p-3"
+        className="border-t border-kumo-line p-4 bg-kumo-base/30"
         onSubmit={(event) => {
           event.preventDefault();
           void send();
@@ -837,42 +836,45 @@ function PreviewTable({
   columns: { name: string }[];
   rows: Record<string, string | number | boolean | null>[];
 }) {
-  const previewWidthPercent =
-    (Math.max(columns.length, PREVIEW_VISIBLE_COLUMN_COUNT) /
-      PREVIEW_VISIBLE_COLUMN_COUNT) *
-    100;
-
   return (
-    <div className="w-full max-w-full overflow-x-auto border-t border-kumo-line">
-      <table
-        className="table-fixed text-left text-xs"
-        style={{ width: `${previewWidthPercent}%` }}
-      >
-        <thead className="bg-kumo-base text-kumo-subtle">
+    <div className="w-full max-w-full overflow-x-auto rounded-b-xl scrollbar-thin scrollbar-thumb-kumo-line scrollbar-track-transparent">
+      <table className="w-full min-w-[800px] text-left text-xs">
+        <thead className="bg-kumo-base/50 text-kumo-subtle sticky top-0 backdrop-blur-sm">
           <tr>
-            {columns.map((column) => (
+            {columns.slice(0, 20).map((column) => (
               <th
                 key={column.name}
-                className="truncate px-3 py-2 font-medium"
+                className="truncate px-4 py-3 font-semibold uppercase tracking-wider"
                 title={column.name}
               >
                 {column.name}
               </th>
             ))}
+            {columns.length > 20 && (
+              <th className="px-4 py-3 font-medium text-kumo-inactive italic">
+                +{columns.length - 20} more columns
+              </th>
+            )}
           </tr>
         </thead>
-        <tbody className="divide-y divide-kumo-line">
+        <tbody className="divide-y divide-kumo-line/50">
           {rows.map((row, rowIndex) => (
-            <tr key={rowIndex}>
-              {columns.map((column) => (
+            <tr
+              key={rowIndex}
+              className="hover:bg-kumo-base/30 transition-colors"
+            >
+              {columns.slice(0, 20).map((column) => (
                 <td
                   key={column.name}
-                  className="truncate px-3 py-2 text-kumo-subtle"
+                  className="truncate px-4 py-3 text-kumo-subtle max-w-[200px]"
                   title={renderPreviewValue(row[column.name])}
                 >
                   {renderPreviewValue(row[column.name])}
                 </td>
               ))}
+              {columns.length > 20 && (
+                <td className="px-4 py-3 bg-kumo-base/5 opacity-50" />
+              )}
             </tr>
           ))}
         </tbody>
@@ -1347,47 +1349,75 @@ function PreparationReviewPanel({
   ];
 
   return (
-    <div className="grid gap-4">
+    <div className="grid gap-6">
       {plan && (
-        <div className="grid gap-2 sm:grid-cols-3">
-          {workflowSteps.map((step) => (
+        <div className="grid gap-4 sm:grid-cols-3">
+          {workflowSteps.map((step, idx) => (
             <div
               key={step.label}
-              className={`rounded-lg border px-3 py-2 ${
+              className={`relative overflow-hidden rounded-xl border p-4 transition-all ${
                 step.complete
-                  ? "border-kumo-brand/40 bg-kumo-brand/10"
-                  : "border-kumo-line bg-kumo-elevated"
+                  ? "border-kumo-brand/30 bg-kumo-brand/5 ring-1 ring-kumo-brand/20"
+                  : "border-kumo-line bg-kumo-elevated opacity-80"
               }`}
             >
               <div className="flex items-center justify-between gap-2">
-                <Text size="xs" variant="secondary">
-                  {step.label}
-                </Text>
-                {step.complete && <CheckCircleIcon size={14} />}
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`flex h-5 w-5 items-center justify-center rounded-full text-[10px] font-bold ${step.complete ? "bg-kumo-brand text-kumo-inverse" : "bg-kumo-line text-kumo-inactive"}`}
+                  >
+                    {idx + 1}
+                  </span>
+                  <Text
+                    size="xs"
+                    variant="secondary"
+                    bold
+                    DANGEROUS_className="uppercase tracking-widest"
+                  >
+                    {step.label.split(". ")[1]}
+                  </Text>
+                </div>
+                {step.complete && (
+                  <CheckCircleIcon size={16} className="text-kumo-brand" />
+                )}
               </div>
-              <Text size="sm" bold>
-                {step.value}
-              </Text>
+              <div className="mt-2">
+                <Text
+                  size="base"
+                  bold
+                  DANGEROUS_className={
+                    step.complete ? "text-kumo-default" : "text-kumo-subtle"
+                  }
+                >
+                  {step.value}
+                </Text>
+              </div>
             </div>
           ))}
         </div>
       )}
-      <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div>
-            <div className="flex items-center gap-2">
-              <MagnifyingGlassIcon size={16} />
-              <Text size="sm" bold>
-                1. Choose target
+      <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-6 shadow-sm">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex items-start gap-3">
+            <div className="mt-1 rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
+              <MagnifyingGlassIcon size={20} />
+            </div>
+            <div>
+              <Text size="base" bold>
+                1. Target Definition
+              </Text>
+              <Text
+                size="sm"
+                variant="secondary"
+                DANGEROUS_className="max-w-xl"
+              >
+                {plan
+                  ? plan.datasetSummary
+                  : "Analyze your dataset to automatically identify the most likely prediction target."}
               </Text>
             </div>
-            <Text size="xs" variant="secondary">
-              {plan
-                ? plan.datasetSummary
-                : "Generate a proposal from the dataset profile."}
-            </Text>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-3">
             {plan && (
               <Button
                 type="button"
@@ -1396,7 +1426,7 @@ function PreparationReviewPanel({
                 icon={<ChatCircleDotsIcon size={14} />}
                 onClick={onSendToChat}
               >
-                Discuss
+                Discuss with Agent
               </Button>
             )}
             <Button
@@ -1407,23 +1437,32 @@ function PreparationReviewPanel({
               disabled={reviewState.status === "loading"}
               onClick={onGenerate}
             >
-              {reviewState.status === "loading" ? "Reviewing" : "Suggest plan"}
+              {reviewState.status === "loading"
+                ? "Analyzing..."
+                : "Suggest Plan"}
             </Button>
           </div>
         </div>
 
         {reviewState.status === "error" && (
-          <div className="mt-3 rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 px-3 py-2">
-            <Text size="sm">{reviewState.message}</Text>
+          <div className="mt-4 rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 px-4 py-3">
+            <Text size="sm" DANGEROUS_className="text-kumo-danger">
+              {reviewState.message}
+            </Text>
           </div>
         )}
 
         {plan && (
-          <div className="mt-3 grid gap-3 rounded-lg border border-kumo-line bg-kumo-base p-3">
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="mt-6 grid gap-4 rounded-xl border border-kumo-line bg-kumo-base p-5">
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                <Text size="xs" variant="secondary">
-                  Suggested target
+                <Text
+                  size="xs"
+                  variant="secondary"
+                  bold
+                  DANGEROUS_className="uppercase tracking-wider"
+                >
+                  Recommended Target
                 </Text>
                 <div className="mt-1 flex flex-wrap items-center gap-2">
                   <Text size="lg" bold>
@@ -1437,17 +1476,21 @@ function PreparationReviewPanel({
                           : "secondary"
                       }
                     >
-                      {suggestedTarget.confidence}
+                      {suggestedTarget.confidence} confidence
                     </Badge>
                   )}
                 </div>
                 {targetEvidence && (
-                  <Text size="xs" variant="secondary">
-                    {targetEvidence}
+                  <Text
+                    size="sm"
+                    variant="secondary"
+                    DANGEROUS_className="mt-2 italic"
+                  >
+                    &quot;{targetEvidence}&quot;
                   </Text>
                 )}
               </div>
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex flex-wrap items-center gap-3">
                 <Button
                   type="button"
                   variant="primary"
@@ -1458,20 +1501,25 @@ function PreparationReviewPanel({
                       onAcceptTarget(suggestedTarget.columnName);
                   }}
                 >
-                  Use suggested target
+                  Apply Recommendation
                 </Button>
-                <SelectBox
-                  value={selectedTarget}
-                  ariaLabel="Choose target column"
-                  onChange={onTargetChange}
-                >
-                  <option value="">Choose target</option>
-                  {summary.columns.map((column) => (
-                    <option key={column.name} value={column.name}>
-                      {column.name}
-                    </option>
-                  ))}
-                </SelectBox>
+                <div className="flex items-center gap-2">
+                  <Text size="xs" variant="secondary">
+                    or select
+                  </Text>
+                  <SelectBox
+                    value={selectedTarget}
+                    ariaLabel="Choose target column"
+                    onChange={onTargetChange}
+                  >
+                    <option value="">Manual Selection</option>
+                    {summary.columns.map((column) => (
+                      <option key={column.name} value={column.name}>
+                        {column.name}
+                      </option>
+                    ))}
+                  </SelectBox>
+                </div>
               </div>
             </div>
           </div>
@@ -1480,43 +1528,64 @@ function PreparationReviewPanel({
 
       {plan && (
         <>
-          <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
-            <div className="flex flex-col gap-2 border-b border-kumo-line p-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <Text size="sm" bold>
-                  2. Keep or drop features
-                </Text>
-                <Text size="xs" variant="secondary">
-                  {featureColumns.length} used, {droppedColumns.length} dropped
-                  {reviewColumns.length > 0
-                    ? `, ${reviewColumns.length} to review`
-                    : ""}
-                </Text>
+          <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+            <div className="flex flex-col gap-3 border-b border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
+                  <GearIcon size={20} />
+                </div>
+                <div>
+                  <Text size="base" bold>
+                    2. Feature Selection
+                  </Text>
+                  <Text size="sm" variant="secondary">
+                    {featureColumns.length} kept, {droppedColumns.length}{" "}
+                    dropped
+                    {reviewColumns.length > 0
+                      ? `, ${reviewColumns.length} pending review`
+                      : ""}
+                  </Text>
+                </div>
               </div>
               <div className="flex flex-wrap gap-2">
                 {plan.globalWarnings.map((warning) => (
-                  <Badge key={warning} variant="secondary">
+                  <Badge
+                    key={warning}
+                    variant="secondary"
+                    className="bg-kumo-warning/10 text-kumo-warning border-kumo-warning/20"
+                  >
                     {warning}
                   </Badge>
                 ))}
               </div>
             </div>
-            <div className="overflow-auto">
+            <div className="overflow-x-auto">
               <table className="min-w-full text-left text-sm">
-                <thead className="bg-kumo-base text-kumo-subtle">
+                <thead className="bg-kumo-base/50 text-kumo-subtle">
                   <tr>
-                    <th className="px-3 py-2 font-medium">Column</th>
-                    <th className="px-3 py-2 font-medium">Suggestion</th>
-                    <th className="px-3 py-2 font-medium">Reason</th>
-                    <th className="px-3 py-2 font-medium">Decision</th>
+                    <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                      Column
+                    </th>
+                    <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                      AI Suggestion
+                    </th>
+                    <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                      Logic/Reason
+                    </th>
+                    <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                      Final Action
+                    </th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-kumo-line">
+                <tbody className="divide-y divide-kumo-line/50">
                   {preparedColumns.map(
                     ({ column, decision, suggestedAction, selectedAction }) => (
-                      <tr key={column.name}>
-                        <td className="px-3 py-2">
-                          <div className="grid gap-1">
+                      <tr
+                        key={column.name}
+                        className="hover:bg-kumo-base/20 transition-colors"
+                      >
+                        <td className="px-4 py-3">
+                          <div className="flex flex-col">
                             <Text size="sm" bold>
                               {column.name}
                             </Text>
@@ -1532,7 +1601,7 @@ function PreparationReviewPanel({
                             </Text>
                           </div>
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="px-4 py-3">
                           <div className="flex flex-wrap gap-2">
                             <Badge
                               variant={
@@ -1544,18 +1613,18 @@ function PreparationReviewPanel({
                               {columnActionLabel(suggestedAction)}
                             </Badge>
                             {decision && (
-                              <Badge variant="secondary">
+                              <Badge variant="secondary" className="opacity-70">
                                 {decision.confidence}
                               </Badge>
                             )}
                           </div>
                         </td>
-                        <td className="max-w-md px-3 py-2 text-kumo-subtle">
+                        <td className="max-w-md px-4 py-3 text-xs text-kumo-subtle leading-relaxed">
                           {decision?.reason ??
                             column.profilingNotes[0]?.message ??
-                            "No strong signal found."}
+                            "No significant profiling notes."}
                         </td>
-                        <td className="px-3 py-2">
+                        <td className="px-4 py-3">
                           <SelectBox
                             value={selectedAction}
                             ariaLabel={`Set role for ${column.name}`}
@@ -1581,13 +1650,17 @@ function PreparationReviewPanel({
                 </tbody>
               </table>
             </div>
-            <div className="flex flex-col gap-2 border-t border-kumo-line p-3 sm:flex-row sm:items-center sm:justify-between">
-              <Text size="xs" variant="secondary">
+            <div className="flex flex-col gap-3 border-t border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <Text
+                size="xs"
+                variant="secondary"
+                DANGEROUS_className="max-w-md"
+              >
                 {isSelectionFinalized
-                  ? "Column selection is finished. Dropped columns will be excluded from preprocessing."
+                  ? "Selection finalized. These features are now locked for preprocessing analysis."
                   : reviewColumns.length > 0
-                    ? "Choose Use or Drop for reviewed columns before finishing."
-                    : "Finish the selection to lock the kept columns for preprocessing."}
+                    ? "Please resolve pending reviews before moving to preprocessing."
+                    : "Finalize your selection to proceed with preprocessing recommendations."}
               </Text>
               <Button
                 type="button"
@@ -1601,20 +1674,25 @@ function PreparationReviewPanel({
                 }
                 onClick={onFinishSelection}
               >
-                Finish selection
+                Lock Selection
               </Button>
             </div>
           </div>
 
-          <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
-            <div className="flex flex-col gap-2 border-b border-kumo-line p-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <Text size="sm" bold>
-                  Preprocessing proposals
-                </Text>
-                <Text size="xs" variant="secondary">
-                  3. Ask the model for custom, dataset-aware steps.
-                </Text>
+          <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+            <div className="flex flex-col gap-3 border-b border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
+                  <BrainIcon size={20} />
+                </div>
+                <div>
+                  <Text size="base" bold>
+                    3. Intelligent Preprocessing
+                  </Text>
+                  <Text size="sm" variant="secondary">
+                    Dataset-aware transformations suggested by the model.
+                  </Text>
+                </div>
               </div>
               <Button
                 type="button"
@@ -1629,34 +1707,48 @@ function PreparationReviewPanel({
                 onClick={onGeneratePreprocessing}
               >
                 {preprocessingState.status === "loading"
-                  ? "Reviewing"
-                  : "Suggest preprocessing"}
+                  ? "Analyzing Data..."
+                  : "Generate Suggestions"}
               </Button>
             </div>
             {preprocessingState.status === "error" && (
-              <div className="border-b border-kumo-line px-3 py-2">
-                <Text size="sm">{preprocessingState.message}</Text>
+              <div className="border-b border-kumo-line px-5 py-3">
+                <Text size="sm" DANGEROUS_className="text-kumo-danger">
+                  {preprocessingState.message}
+                </Text>
               </div>
             )}
             {preprocessingState.status !== "ready" ? (
-              <div className="px-3 py-4">
-                <Text size="sm" variant="secondary">
-                  Preprocessing suggestions will use only the columns kept when
-                  the selection was finished.
+              <div className="px-5 py-10 text-center">
+                <Text
+                  size="sm"
+                  variant="secondary"
+                  DANGEROUS_className="max-w-sm mx-auto"
+                >
+                  Finalize Step 2 to enable preprocessing recommendations for
+                  your kept features.
                 </Text>
               </div>
             ) : (
-              <div className="overflow-auto">
+              <div className="overflow-x-auto">
                 <table className="min-w-full text-left text-sm">
-                  <thead className="bg-kumo-base text-kumo-subtle">
+                  <thead className="bg-kumo-base/50 text-kumo-subtle">
                     <tr>
-                      <th className="px-3 py-2 font-medium">Column</th>
-                      <th className="px-3 py-2 font-medium">Recommendation</th>
-                      <th className="px-3 py-2 font-medium">Why</th>
-                      <th className="px-3 py-2 font-medium">Selected</th>
+                      <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                        Column
+                      </th>
+                      <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                        Recommended Step
+                      </th>
+                      <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                        Context
+                      </th>
+                      <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                        Selection
+                      </th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-kumo-line">
+                  <tbody className="divide-y divide-kumo-line/50">
                     {preparedColumns.map(
                       ({
                         column,
@@ -1666,11 +1758,14 @@ function PreparationReviewPanel({
                       }) =>
                         column.name !== targetColumn &&
                         selectedAction === "feature" ? (
-                          <tr key={column.name}>
-                            <td className="px-3 py-2 font-medium text-kumo-default">
+                          <tr
+                            key={column.name}
+                            className="hover:bg-kumo-base/20 transition-colors"
+                          >
+                            <td className="px-4 py-3 font-bold text-kumo-default">
                               {column.name}
                             </td>
-                            <td className="px-3 py-2">
+                            <td className="px-4 py-3">
                               <Badge
                                 variant={
                                   isNoPreprocessingChoice(
@@ -1685,18 +1780,18 @@ function PreparationReviewPanel({
                                 )}
                               </Badge>
                             </td>
-                            <td className="max-w-md px-3 py-2">
-                              <div className="grid gap-1 text-kumo-subtle">
+                            <td className="max-w-md px-4 py-3">
+                              <div className="flex flex-col gap-1 text-xs text-kumo-subtle leading-relaxed">
                                 <span>{suggestedPreprocessing.reason}</span>
                                 {suggestedPreprocessing.implementation && (
-                                  <span className="text-xs">
+                                  <span className="opacity-70 font-mono text-[10px]">
                                     {suggestedPreprocessing.implementation}
                                   </span>
                                 )}
                               </div>
                             </td>
-                            <td className="px-3 py-2">
-                              <div className="grid min-w-56 gap-1">
+                            <td className="px-4 py-3">
+                              <div className="grid min-w-[240px] gap-1.5">
                                 {getSelectablePreprocessingOptions(
                                   suggestedPreprocessing,
                                   column
@@ -1707,7 +1802,7 @@ function PreparationReviewPanel({
                                   return (
                                     <label
                                       key={choice}
-                                      className="flex items-center gap-2 text-xs text-kumo-subtle"
+                                      className={`flex items-center gap-2 px-2 py-1 rounded transition-colors cursor-pointer ${checked ? "bg-kumo-brand/10 text-kumo-brand" : "hover:bg-kumo-base text-kumo-subtle"}`}
                                     >
                                       <input
                                         type="checkbox"
@@ -1715,6 +1810,7 @@ function PreparationReviewPanel({
                                         disabled={isNoPreprocessingChoice(
                                           choice
                                         )}
+                                        className="accent-kumo-brand"
                                         onChange={(event) =>
                                           onPreprocessingChoiceChange(
                                             column.name,
@@ -1723,7 +1819,7 @@ function PreparationReviewPanel({
                                           )
                                         }
                                       />
-                                      <span>
+                                      <span className="text-[11px] font-medium">
                                         {preprocessingChoiceLabel(choice)}
                                       </span>
                                     </label>
@@ -1740,72 +1836,104 @@ function PreparationReviewPanel({
             )}
           </div>
 
-          <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-            <Text size="sm" bold>
-              Final preparation plan
-            </Text>
-            <div className="mt-3 grid gap-2 sm:grid-cols-3">
+          <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-6 shadow-sm">
+            <div className="flex items-center gap-3 mb-6">
+              <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
+                <CheckCircleIcon size={20} />
+              </div>
+              <Text size="base" bold>
+                Final Preparation Plan
+              </Text>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-3">
               <ColumnList
-                label="Target"
+                label="Prediction Target"
                 columns={targetColumn ? [targetColumn] : []}
               />
               <ColumnList
-                label="Features"
+                label="Feature Set"
                 columns={featureColumns.map((item) => item.column.name)}
               />
               <ColumnList
-                label="Dropped"
+                label="Excluded"
                 columns={droppedColumns.map((item) => item.column.name)}
               />
             </div>
-            <div className="mt-3 rounded-lg border border-kumo-line bg-kumo-base p-3">
-              <Text size="xs" variant="secondary">
-                Preprocessing
-              </Text>
+
+            <div className="mt-4 rounded-xl border border-kumo-line bg-kumo-base p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <Badge
+                  variant="secondary"
+                  className="text-[10px] font-bold uppercase tracking-widest"
+                >
+                  Active Transforms
+                </Badge>
+              </div>
               {activePreprocessing.length > 0 ? (
-                <ul className="mt-2 grid gap-1">
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                   {activePreprocessing.map((item) => (
-                    <li
+                    <div
                       key={item.column.name}
-                      className="text-xs text-kumo-subtle"
+                      className="flex flex-col gap-1 border-l-2 border-kumo-brand/30 pl-3"
                     >
-                      {item.column.name}:{" "}
-                      {selectedNonNoStepChoices(item.selectedPreprocessing)
-                        .map(preprocessingChoiceLabel)
-                        .join(", ")}
-                    </li>
+                      <Text size="xs" bold DANGEROUS_className="truncate">
+                        {item.column.name}
+                      </Text>
+                      <Text size="xs" variant="secondary">
+                        {selectedNonNoStepChoices(item.selectedPreprocessing)
+                          .map(preprocessingChoiceLabel)
+                          .join(", ")}
+                      </Text>
+                    </div>
                   ))}
-                </ul>
+                </div>
               ) : (
-                <Text size="sm" bold>
-                  None
-                </Text>
+                <div className="flex items-center gap-2 text-kumo-inactive">
+                  <Text size="sm">No custom transformations selected.</Text>
+                </div>
               )}
             </div>
-            <div className="mt-3 flex flex-col gap-2 border-t border-kumo-line pt-3 sm:flex-row sm:items-center sm:justify-between">
-              <div>
-                <Text size="xs" variant="secondary">
-                  Export
-                </Text>
-                <Text size="sm" bold>
-                  Target stays unchanged; transforms apply only to kept
-                  features.
+
+            <div className="mt-8 flex flex-col gap-4 border-t border-kumo-line pt-6 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex flex-col gap-1">
+                <div className="flex items-center gap-2">
+                  <div className="h-2 w-2 rounded-full bg-kumo-success animate-pulse" />
+                  <Text size="sm" bold>
+                    Pipeline Verified
+                  </Text>
+                </div>
+                <Text
+                  size="xs"
+                  variant="secondary"
+                  DANGEROUS_className="max-w-md"
+                >
+                  Feature engineering steps are mapped. The target column
+                  remains in its original form to prevent leakage during
+                  training.
                 </Text>
                 {transformState.status === "error" && (
-                  <Text size="xs">{transformState.message}</Text>
+                  <Text size="xs" DANGEROUS_className="text-kumo-danger mt-1">
+                    {transformState.message}
+                  </Text>
                 )}
                 {transformState.status === "ready" && (
-                  <Text size="xs" variant="secondary">
-                    Downloaded {transformState.rowCount.toLocaleString()} rows
-                    with {transformState.columns.toLocaleString()} columns.
+                  <Text
+                    size="xs"
+                    DANGEROUS_className="text-kumo-success mt-1 font-medium"
+                  >
+                    Successfully exported{" "}
+                    {transformState.rowCount.toLocaleString()} rows with{" "}
+                    {transformState.columns.toLocaleString()} columns.
                   </Text>
                 )}
               </div>
               <Button
                 type="button"
                 variant="primary"
-                size="sm"
-                icon={<DownloadSimpleIcon size={14} />}
+                size="base"
+                className="px-6"
+                icon={<DownloadSimpleIcon size={16} />}
                 disabled={
                   !targetColumn ||
                   !isSelectionFinalized ||
@@ -1814,22 +1942,37 @@ function PreparationReviewPanel({
                 onClick={onDownloadTransformed}
               >
                 {transformState.status === "running"
-                  ? "Preparing"
-                  : "Download transformed CSV"}
+                  ? "Processing..."
+                  : "Download Processed CSV"}
               </Button>
             </div>
             {transformState.status === "ready" && (
-              <div className="mt-3 rounded-lg border border-kumo-line bg-kumo-base p-3">
-                <Text size="xs" variant="secondary">
-                  Leakage audit
-                </Text>
-                <ul className="mt-2 grid gap-1">
+              <div className="mt-6 rounded-xl border border-kumo-line bg-kumo-base/50 p-5">
+                <div className="flex items-center gap-2 mb-3">
+                  <GearIcon size={14} className="text-kumo-inactive" />
+                  <Text
+                    size="xs"
+                    bold
+                    variant="secondary"
+                    DANGEROUS_className="uppercase tracking-widest"
+                  >
+                    Post-Process Audit
+                  </Text>
+                </div>
+                <div className="grid gap-2">
                   {transformState.audit.map((item) => (
-                    <li key={item} className="text-xs text-kumo-subtle">
-                      {item}
-                    </li>
+                    <div
+                      key={item}
+                      className="flex items-start gap-2 text-xs text-kumo-subtle"
+                    >
+                      <CheckCircleIcon
+                        size={12}
+                        className="mt-0.5 text-kumo-success"
+                      />
+                      <span>{item}</span>
+                    </div>
                   ))}
-                </ul>
+                </div>
               </div>
             )}
           </div>
@@ -2645,19 +2788,54 @@ function DatasetWorkspace() {
           </div>
         </div>
 
-        <div className="rounded-lg border border-dashed border-kumo-line bg-kumo-elevated px-4 py-5 text-center">
-          <Text size="sm" bold>
-            Drop a CSV here
-          </Text>
-          <Text size="xs" variant="secondary">
-            `.csv` only, up to {formatBytes(MAX_CSV_SIZE_BYTES)}. Profiling runs
-            locally in the browser. You will choose a train/test split before
-            analysis begins.
-          </Text>
+        <div
+          className={`relative group rounded-xl border-2 border-dashed p-8 transition-all duration-200 text-center ${
+            isCsvDragging
+              ? "border-kumo-brand bg-kumo-brand/5"
+              : "border-kumo-line bg-kumo-elevated hover:border-kumo-brand/30"
+          }`}
+        >
+          <div className="flex flex-col items-center gap-3">
+            <div
+              className={`p-4 rounded-full transition-colors ${isCsvDragging ? "bg-kumo-brand/20 text-kumo-brand" : "bg-kumo-base text-kumo-inactive group-hover:text-kumo-brand/70"}`}
+            >
+              <DownloadSimpleIcon size={32} />
+            </div>
+            <div>
+              <Text size="base" bold>
+                {uploadState.status === "idle"
+                  ? "Drop your CSV here"
+                  : "Change dataset"}
+              </Text>
+              <Text
+                size="sm"
+                variant="secondary"
+                DANGEROUS_className="mt-1 max-w-md"
+              >
+                Drag and drop a file, or click to browse. Supports `.csv` up to{" "}
+                {formatBytes(MAX_CSV_SIZE_BYTES)}.
+              </Text>
+            </div>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              icon={<PaperclipIcon size={14} />}
+              onClick={() => csvInputRef.current?.click()}
+              disabled={
+                uploadState.status === "validating" ||
+                uploadState.status === "parsing"
+              }
+            >
+              Choose File
+            </Button>
+          </div>
         </div>
 
         {uploadState.status === "validating" && (
-          <Badge variant="secondary">Validating {uploadState.fileName}</Badge>
+          <Badge variant="secondary" className="animate-pulse">
+            Validating {uploadState.fileName}...
+          </Badge>
         )}
         {uploadState.status === "choosing_split" && (
           <SplitConfigPanel
@@ -2668,7 +2846,9 @@ function DatasetWorkspace() {
           />
         )}
         {uploadState.status === "parsing" && (
-          <Badge variant="secondary">Parsing {uploadState.fileName}</Badge>
+          <Badge variant="secondary" className="animate-pulse">
+            Parsing {uploadState.fileName}...
+          </Badge>
         )}
         {uploadState.status === "error" && (
           <div className="rounded-lg border border-kumo-danger/40 bg-kumo-danger/10 px-3 py-2">
@@ -2677,52 +2857,95 @@ function DatasetWorkspace() {
         )}
 
         {currentSummary ? (
-          <div className="grid gap-4">
-            <div className="grid gap-2 sm:grid-cols-4">
-              <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-                <Text size="xs" variant="secondary">
-                  File
+          <div className="grid gap-6">
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+              <div className="flex flex-col gap-1 rounded-xl border border-kumo-line bg-kumo-elevated p-4 transition-all hover:border-kumo-brand/50">
+                <Text
+                  size="xs"
+                  variant="secondary"
+                  bold
+                  DANGEROUS_className="uppercase tracking-wider"
+                >
+                  File Name
                 </Text>
-                <Text size="sm" bold>
+                <Text size="base" bold DANGEROUS_className="truncate">
                   {currentSummary.fileName}
                 </Text>
-              </div>
-              <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
                 <Text size="xs" variant="secondary">
-                  Size
-                </Text>
-                <Text size="sm" bold>
                   {formatBytes(currentSummary.fileSizeBytes)}
                 </Text>
               </div>
-              <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-                <Text size="xs" variant="secondary">
-                  Rows (training)
+              <div className="flex flex-col gap-1 rounded-xl border border-kumo-line bg-kumo-elevated p-4 transition-all hover:border-kumo-brand/50">
+                <Text
+                  size="xs"
+                  variant="secondary"
+                  bold
+                  DANGEROUS_className="uppercase tracking-wider"
+                >
+                  Training Rows
                 </Text>
-                <Text size="sm" bold>
-                  {currentSummary.parsedRowCount.toLocaleString()}
-                </Text>
-              </div>
-              {uploadState.status === "ready" && uploadState.splitConfig && (
-                <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
-                  <Text size="xs" variant="secondary">
-                    Held out (test)
+                <div className="flex items-baseline gap-2">
+                  <Text size="lg" bold>
+                    {currentSummary.parsedRowCount.toLocaleString()}
                   </Text>
-                  <Text size="sm" bold>
+                  <Text size="xs" variant="secondary">
+                    rows
+                  </Text>
+                </div>
+                {uploadState.status === "ready" && uploadState.splitConfig && (
+                  <Text size="xs" DANGEROUS_className="text-kumo-success">
+                    {Math.round(uploadState.splitConfig.trainRatio * 100)}% of
+                    total
+                  </Text>
+                )}
+              </div>
+              <div className="flex flex-col gap-1 rounded-xl border border-kumo-line bg-kumo-elevated p-4 transition-all hover:border-kumo-brand/50">
+                <Text
+                  size="xs"
+                  variant="secondary"
+                  bold
+                  DANGEROUS_className="uppercase tracking-wider"
+                >
+                  Held Out (Test)
+                </Text>
+                <div className="flex items-baseline gap-2">
+                  <Text size="lg" bold>
                     {Math.round(
                       currentSummary.parsedRowCount /
-                        uploadState.splitConfig.trainRatio -
+                        (uploadState.status === "ready" &&
+                        uploadState.splitConfig
+                          ? uploadState.splitConfig.trainRatio
+                          : 1) -
                         currentSummary.parsedRowCount
                     ).toLocaleString()}
                   </Text>
+                  <Text size="xs" variant="secondary">
+                    rows
+                  </Text>
                 </div>
-              )}
-              <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-3">
                 <Text size="xs" variant="secondary">
-                  Columns
+                  Excluded from profiling
                 </Text>
-                <Text size="sm" bold>
-                  {currentSummary.columns.length}
+              </div>
+              <div className="flex flex-col gap-1 rounded-xl border border-kumo-line bg-kumo-elevated p-4 transition-all hover:border-kumo-brand/50">
+                <Text
+                  size="xs"
+                  variant="secondary"
+                  bold
+                  DANGEROUS_className="uppercase tracking-wider"
+                >
+                  Total Columns
+                </Text>
+                <div className="flex items-baseline gap-2">
+                  <Text size="lg" bold>
+                    {currentSummary.columns.length}
+                  </Text>
+                  <Text size="xs" variant="secondary">
+                    features
+                  </Text>
+                </div>
+                <Text size="xs" variant="secondary">
+                  {columnQualityCounts.hasNotes} with warnings
                 </Text>
               </div>
             </div>
@@ -2782,48 +3005,54 @@ function DatasetWorkspace() {
               onSendToChat={sendAiReviewToChat}
             />
 
-            <div className="rounded-lg border border-kumo-line bg-kumo-elevated">
-              <div className="grid gap-3 border-b border-kumo-line p-3">
-                <div className="flex flex-wrap gap-2">
-                  <Badge variant="secondary">
-                    {columnQualityCounts.hasNotes} columns with notes
-                  </Badge>
-                  <Badge variant="secondary">
-                    {columnQualityCounts.highMissingness} high missingness
-                  </Badge>
-                  <Badge variant="secondary">
-                    {columnQualityCounts.likelyIdentifiers} likely IDs
-                  </Badge>
-                  <Badge variant="secondary">
-                    {columnQualityCounts.empty} empty
-                  </Badge>
-                  <Badge variant="secondary">
-                    {columnQualityCounts.constant} constant
-                  </Badge>
+            <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+              <div className="flex flex-col gap-4 border-b border-kumo-line bg-kumo-base/30 p-5">
+                <div className="flex flex-wrap items-center justify-between gap-4">
+                  <div className="flex flex-col gap-1">
+                    <Text size="base" bold>
+                      Column Quality Analysis
+                    </Text>
+                    <Text size="xs" variant="secondary">
+                      Inspect and filter columns based on profiling results.
+                    </Text>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <Badge variant="secondary" className="opacity-80">
+                      {columnQualityCounts.hasNotes} with notes
+                    </Badge>
+                    <Badge variant="secondary" className="opacity-80">
+                      {columnQualityCounts.highMissingness} high missingness
+                    </Badge>
+                    <Badge variant="secondary" className="opacity-80">
+                      {columnQualityCounts.likelyIdentifiers} IDs
+                    </Badge>
+                  </div>
                 </div>
+
                 <div className="flex flex-wrap gap-2">
                   {COLUMN_FILTERS.map((filter) => (
-                    <Button
+                    <button
                       key={filter.key}
                       type="button"
-                      size="sm"
-                      variant={
-                        columnFilter === filter.key ? "primary" : "secondary"
-                      }
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                        columnFilter === filter.key
+                          ? "bg-kumo-brand text-kumo-inverse shadow-sm"
+                          : "bg-kumo-base text-kumo-subtle hover:bg-kumo-line/50"
+                      }`}
                       onClick={() => setColumnFilter(filter.key)}
                     >
                       {filter.label}
-                    </Button>
+                    </button>
                   ))}
                 </div>
               </div>
 
-              <div className="overflow-auto">
+              <div className="overflow-x-auto scrollbar-thin scrollbar-thumb-kumo-line scrollbar-track-transparent">
                 <table className="min-w-full text-left text-sm">
-                  <thead className="bg-kumo-elevated text-kumo-subtle">
+                  <thead className="bg-kumo-base/50 text-kumo-subtle backdrop-blur-sm">
                     <tr>
                       <SortableColumnHeader
-                        label="Column"
+                        label="Column Name"
                         sortKey="name"
                         currentSort={columnSort}
                         onSort={updateColumnSort}
@@ -2841,13 +3070,13 @@ function DatasetWorkspace() {
                         onSort={updateColumnSort}
                       />
                       <SortableColumnHeader
-                        label="% missing"
+                        label="% Missing"
                         sortKey="missingPercent"
                         currentSort={columnSort}
                         onSort={updateColumnSort}
                       />
                       <SortableColumnHeader
-                        label="Non-missing"
+                        label="Populated"
                         sortKey="nonMissingCount"
                         currentSort={columnSort}
                         onSort={updateColumnSort}
@@ -2859,13 +3088,17 @@ function DatasetWorkspace() {
                         onSort={updateColumnSort}
                       />
                       <SortableColumnHeader
-                        label="Unique ratio"
+                        label="Cardinality"
                         sortKey="uniqueRatio"
                         currentSort={columnSort}
                         onSort={updateColumnSort}
                       />
-                      <th className="px-3 py-2 font-medium">Top values</th>
-                      <th className="px-3 py-2 font-medium">Samples</th>
+                      <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                        Top Values
+                      </th>
+                      <th className="px-4 py-3 font-semibold uppercase tracking-wider text-[10px]">
+                        Samples
+                      </th>
                       <SortableColumnHeader
                         label="Notes"
                         sortKey="notesCount"
@@ -2874,19 +3107,22 @@ function DatasetWorkspace() {
                       />
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-kumo-line">
+                  <tbody className="divide-y divide-kumo-line/50">
                     {visibleColumns.map((column) => (
-                      <tr key={column.name}>
-                        <td className="px-3 py-2 font-medium text-kumo-default">
+                      <tr
+                        key={column.name}
+                        className="hover:bg-kumo-base/20 transition-colors"
+                      >
+                        <td className="px-4 py-4 font-bold text-kumo-default">
                           {column.name}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
+                        <td className="px-4 py-4 text-xs text-kumo-subtle">
                           {column.inferredType}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
-                          {column.missingCount}
+                        <td className="px-4 py-4 text-xs text-kumo-subtle">
+                          {column.missingCount.toLocaleString()}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
+                        <td className="px-4 py-4 text-xs text-kumo-subtle">
                           {formatPercent(
                             getMissingPercent(
                               column,
@@ -2894,45 +3130,67 @@ function DatasetWorkspace() {
                             )
                           )}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
+                        <td className="px-4 py-4 text-xs text-kumo-subtle">
                           {column.nonMissingCount.toLocaleString()}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
+                        <td className="px-4 py-4 text-xs text-kumo-subtle">
                           {column.uniqueCount.toLocaleString()}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
+                        <td className="px-4 py-4 text-xs text-kumo-subtle">
                           {formatPercent(column.uniqueRatio * 100)}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
+                        <td className="px-4 py-4 text-xs text-kumo-subtle">
                           {column.topValues.length > 0 ? (
-                            <div className="grid gap-1">
+                            <div className="flex flex-col gap-1 max-w-[200px]">
                               {column.topValues.map((topValue) => (
-                                <span key={topValue.value}>
-                                  {topValue.value} ({topValue.count},{" "}
-                                  {formatPercent(topValue.percent)})
+                                <span
+                                  key={topValue.value}
+                                  className="truncate"
+                                  title={`${topValue.value} (${topValue.count})`}
+                                >
+                                  <span className="font-medium text-kumo-default">
+                                    {topValue.value}
+                                  </span>
+                                  <span className="ml-1 opacity-60">
+                                    ({formatPercent(topValue.percent)})
+                                  </span>
                                 </span>
                               ))}
                             </div>
                           ) : (
-                            "No non-empty values"
+                            <span className="italic opacity-40">Empty</span>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
-                          {column.sampleValues.length > 0
-                            ? column.sampleValues.join(", ")
-                            : "No non-empty samples"}
+                        <td className="px-4 py-4 text-xs text-kumo-subtle">
+                          {column.sampleValues.length > 0 ? (
+                            <div
+                              className="truncate max-w-[200px]"
+                              title={column.sampleValues.join(", ")}
+                            >
+                              {column.sampleValues.join(", ")}
+                            </div>
+                          ) : (
+                            <span className="italic opacity-40">None</span>
+                          )}
                         </td>
-                        <td className="px-3 py-2 text-kumo-subtle">
+                        <td className="px-4 py-4">
                           {column.profilingNotes.length > 0 ? (
-                            <div className="grid gap-1">
+                            <div className="flex flex-wrap gap-1">
                               {column.profilingNotes.map((note) => (
-                                <span key={note.code}>
-                                  {note.message} ({note.affectedCount})
-                                </span>
+                                <Badge
+                                  key={note.code}
+                                  variant="secondary"
+                                  className="text-[9px] py-0 px-1 font-medium bg-kumo-warning/10 text-kumo-warning border-kumo-warning/20"
+                                >
+                                  {note.code.replaceAll("_", " ")}
+                                </Badge>
                               ))}
                             </div>
                           ) : (
-                            "No notes"
+                            <CheckCircleIcon
+                              size={14}
+                              className="text-kumo-success opacity-40"
+                            />
                           )}
                         </td>
                       </tr>
@@ -2962,30 +3220,72 @@ function DatasetWorkspace() {
 }
 
 function AppShell() {
+  const [showChat, setShowChat] = useState(false);
+
   return (
     <div className="min-h-screen bg-kumo-base text-kumo-default">
-      <header className="border-b border-kumo-line bg-kumo-base">
+      <header className="sticky top-0 z-20 border-b border-kumo-line bg-kumo-base/80 backdrop-blur-sm">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4">
-          <div>
-            <Text size="lg" bold>
+          <div className="flex flex-col">
+            <Text size="lg" bold DANGEROUS_className="leading-tight">
               Automated FE
             </Text>
-            <Text size="sm" variant="secondary">
+            <Text size="xs" variant="secondary">
               CSV profiling and preprocessing workspace
             </Text>
           </div>
-          <ThemeToggle />
+          <div className="flex items-center gap-2">
+            <Button
+              variant="secondary"
+              size="sm"
+              className="lg:hidden"
+              icon={<ChatCircleDotsIcon size={18} />}
+              onClick={() => setShowChat(!showChat)}
+            >
+              Chat
+            </Button>
+            <ThemeToggle />
+          </div>
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-7xl gap-5 px-5 py-5 lg:grid-cols-[minmax(0,1fr)_380px]">
-        <div className="min-w-0">
+      <main className="mx-auto grid max-w-7xl gap-6 px-5 py-6 lg:grid-cols-[1fr_380px]">
+        <div className="min-w-0 space-y-6">
           <DatasetWorkspace />
         </div>
-        <aside className="min-w-0">
-          <AgentChatSidebar />
+        <aside
+          className={`fixed inset-y-0 right-0 z-30 w-full max-w-[400px] border-l border-kumo-line bg-kumo-base p-5 shadow-2xl transition-transform duration-300 ease-in-out lg:static lg:z-0 lg:block lg:w-auto lg:max-w-none lg:border-none lg:bg-transparent lg:p-0 lg:shadow-none lg:transition-none ${
+            showChat ? "translate-x-0" : "translate-x-full lg:translate-x-0"
+          }`}
+        >
+          <div className="flex h-full flex-col">
+            <div className="mb-4 flex items-center justify-between lg:hidden">
+              <div className="flex items-center gap-2">
+                <ChatCircleDotsIcon size={20} />
+                <Text bold>Agent Chat</Text>
+              </div>
+              <Button
+                variant="ghost"
+                shape="square"
+                size="sm"
+                icon={<XIcon size={18} />}
+                aria-label="Close chat"
+                onClick={() => setShowChat(false)}
+              />
+            </div>
+            <AgentChatSidebar />
+          </div>
         </aside>
       </main>
+
+      {showChat && (
+        <button
+          type="button"
+          aria-label="Close chat"
+          className="fixed inset-0 z-20 w-full h-full bg-kumo-contrast/10 backdrop-blur-[2px] lg:hidden cursor-default border-none p-0 outline-none"
+          onClick={() => setShowChat(false)}
+        />
+      )}
     </div>
   );
 }

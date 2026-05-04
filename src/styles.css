@@ -9,3 +9,34 @@ body,
   height: 100%;
   margin: 0;
 }
+
+/* Custom Scrollbar Utilities */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: rgba(var(--kumo-color-line-rgb, 0, 0, 0), 0.2);
+  border-radius: 10px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: rgba(var(--kumo-color-line-rgb, 0, 0, 0), 0.4);
+}
+
+/* Fix for streamdown themes */
+.sd-theme {
+  background: transparent !important;
+  padding: 0 !important;
+}
+
+.sd-theme pre {
+  margin: 1rem 0 !important;
+  border-radius: 0.75rem !important;
+  border: 1px solid var(--kumo-color-line) !important;
+}

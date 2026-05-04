@@ -19,6 +19,25 @@ const JSON_GENERATION_SETTINGS = {
   temperature: 0
 } as const;
 
+// Wrap generateText with simple retry on transient errors (e.g., 504 Gateway Time-out).
+async function generateTextWithRetries(opts: any, attempts = 3) {
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await generateText(opts);
+    } catch (err: any) {
+      const msg = String(err || "");
+      const isGateway =
+        msg.includes("504") ||
+        msg.includes("Gateway Time-out") ||
+        msg.includes("Gateway Timeout");
+      if (i === attempts - 1 || !isGateway) throw err;
+      const backoff = 500 * Math.pow(2, i);
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((res) => setTimeout(res, backoff));
+    }
+  }
+}
+
 const columnAssumptionSchema = z.object({
   id: z.string(),
   columnName: z.string(),
@@ -1117,7 +1136,7 @@ async function handleAiReview(request: Request, env: Env) {
   const model = env.AI_MODEL || DEFAULT_AI_MODEL;
   const profile = parsedProfile.data;
 
-  const result = await generateText({
+  const result = await generateTextWithRetries({
     model: workersai(model),
     ...JSON_GENERATION_SETTINGS,
     system:
@@ -1135,7 +1154,7 @@ async function handleAiReview(request: Request, env: Env) {
     return Response.json(buildFallbackPreprocessingPlan(profile));
   }
 
-  const preprocessingResult = await generateText({
+  const preprocessingResult = await generateTextWithRetries({
     model: workersai(model),
     ...JSON_GENERATION_SETTINGS,
     system:
@@ -1187,7 +1206,7 @@ async function handleColumnSelection(request: Request, env: Env) {
   const workersai = createWorkersAI({ binding: env.AI });
   const model = env.AI_MODEL || DEFAULT_AI_MODEL;
   const profile = parsedProfile.data;
-  const result = await generateText({
+  const result = await generateTextWithRetries({
     model: workersai(model),
     ...JSON_GENERATION_SETTINGS,
     system:
@@ -1234,7 +1253,7 @@ async function handlePreprocessingReview(request: Request, env: Env) {
   );
   const workersai = createWorkersAI({ binding: env.AI });
   const model = env.AI_MODEL || DEFAULT_AI_MODEL;
-  const result = await generateText({
+  const result = await generateTextWithRetries({
     model: workersai(model),
     ...JSON_GENERATION_SETTINGS,
     system:
