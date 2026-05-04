@@ -8,9 +8,7 @@ The current version focuses on **CSV profiling, AI-assisted review, deterministi
 
 ## Demo
 
-```md
-![Automated FE demo](https://github.com/user-attachments/assets/6fb78488-6f12-469b-944d-a837d48d0327)
-```
+[Demo](https://github.com/user-attachments/assets/6fb78488-6f12-469b-944d-a837d48d0327)
 
 ---
 
@@ -55,7 +53,7 @@ flowchart LR
   H --> I[Export prepared train/test CSVs]
 ```
 
-## Product workflow
+## Project workflow
 
 1. **Start a workspace.** Workspaces are stored in the browser so separate dataset experiments can be kept apart.
 2. **Choose a dataset.** Upload a CSV file or load one of the bundled sample datasets from `public/datasets/`.
@@ -94,7 +92,6 @@ flowchart TD
   Worker --> AI[Workers AI model]
   Worker --> Agent[Cloudflare Agents Durable Object]
   Agent --> AI
-  Agent --> MCP[MCP tools]
   Browser --> LocalStorage[Browser localStorage workspaces]
   Browser --> Export[Prepared CSV download]
 ```
@@ -171,14 +168,6 @@ This project is configured for Cloudflare Workers with `wrangler.jsonc`. The dep
 npm run deploy
 ```
 
-Equivalent manual commands:
-
-```sh
-npm run check
-npx vite build
-npx wrangler deploy
-```
-
 Before deploying:
 
 1. Log in to Cloudflare if needed:
@@ -219,19 +208,6 @@ Before deploying:
    ```
 
 Wrangler deploys the Worker and static assets together. The current configuration also routes `/agents/*`, `/api/*`, and `/oauth/*` through the Worker before asset handling so the API and agent endpoints are handled by `src/server.ts`.
-
-## Useful commands
-
-| Command            | Purpose                                           |
-| ------------------ | ------------------------------------------------- |
-| `npm run dev`      | Start the Vite dev server                         |
-| `npx wrangler dev` | Run locally with Wrangler                         |
-| `npm run check`    | Run formatting check, lint, TypeScript, and tests |
-| `npm run test`     | Run Vitest tests                                  |
-| `npm run lint`     | Run oxlint                                        |
-| `npm run format`   | Format the project                                |
-| `npm run types`    | Generate Cloudflare types into `env.d.ts`         |
-| `npm run deploy`   | Build and deploy to Cloudflare Workers            |
 
 ## Notes and constraints
 
