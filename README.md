@@ -9,10 +9,6 @@ The current version focuses on **CSV profiling, AI-assisted review, deterministi
 ## Demo
 
 ```md
-
-```
-
-```md
 ![Automated FE demo](https://github.com/user-attachments/assets/6fb78488-6f12-469b-944d-a837d48d0327)
 ```
 
