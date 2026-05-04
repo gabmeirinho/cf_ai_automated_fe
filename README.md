@@ -1,4 +1,4 @@
-# automated-fe — AI-assisted dataset preparation and automated feature engineering
+# Automated Feature Engineering — AI-assisted dataset preparation and automated feature engineering
 
 `automated-fe` is a Cloudflare Workers AI application for exploring how AI can help with the early stages of a machine learning workflow: understanding a CSV dataset, selecting the target and usable feature columns, suggesting safe preprocessing steps, and preparing the data for modeling.
 
