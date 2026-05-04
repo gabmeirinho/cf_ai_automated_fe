@@ -8,23 +8,12 @@ The current version focuses on **CSV profiling, AI-assisted review, deterministi
 
 ## Demo
 
-If you recorded a short demo, the easiest way to add it to this README is to host the video and paste the URL under this section:
-
 ```md
-https://github.com/user-attachments/assets/6fb78488-6f12-469b-944d-a837d48d0327
+
 ```
 
-For GitHub, a common workflow is:
-
-1. Open a GitHub issue, pull request, or release draft.
-2. Drag the `.mp4`, `.mov`, or `.webm` file into the text box.
-3. Copy the generated `https://github.com/user-attachments/assets/...` URL.
-4. Paste that URL above or replace this section with it.
-
-For an inline preview, export the recording as a smaller GIF and commit it under `docs/demo.gif`:
-
 ```md
-![Automated FE demo](docs/demo.gif)
+![Automated FE demo](https://github.com/user-attachments/assets/6fb78488-6f12-469b-944d-a837d48d0327)
 ```
 
 Keep large videos out of the repository when possible. Use GitHub user attachments, a release asset, or another video host for the full recording.
