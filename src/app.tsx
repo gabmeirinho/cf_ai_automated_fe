@@ -51,6 +51,7 @@ import {
   MoonIcon,
   PaperclipIcon,
   PaperPlaneRightIcon,
+  PlusIcon,
   SunIcon,
   StopIcon,
   XCircleIcon,
@@ -135,6 +136,14 @@ type PreprocessingChoice = PreprocessingSuggestionAction;
 
 type PreprocessingChoices = Record<string, PreprocessingChoice[]>;
 
+interface HostedDataset {
+  id: string;
+  name: string;
+  description: string;
+  fileName: string;
+  path: string;
+}
+
 const COLUMN_FILTERS: Array<{
   key: ColumnFilter;
   label: string;
@@ -147,8 +156,151 @@ const COLUMN_FILTERS: Array<{
   { key: "likely_identifier", label: "Likely ID" }
 ];
 
+type HostedDatasetCatalogState =
+  | { status: "loading" }
+  | { status: "ready" }
+  | { status: "error"; message: string };
+
+const DATASET_MANIFEST_PATH = "/datasets/manifest.json";
+const WORKSPACES_STORAGE_KEY = "automated-fe:workspaces";
+const ACTIVE_WORKSPACE_STORAGE_KEY = "automated-fe:active-workspace";
+const WORKSPACE_STATE_STORAGE_PREFIX = "automated-fe:workspace-state:";
+
+interface Workspace {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface PersistedUploadReadyState {
+  status: "ready";
+  summary: DatasetSummary;
+  csvText: string;
+  fileName: string;
+  splitConfig?: SplitConfig;
+  rowCount: number;
+}
+
+interface PersistedWorkspaceState {
+  uploadState: { status: "idle" } | PersistedUploadReadyState;
+  aiReviewState: AiReviewState;
+  preprocessingReviewState: PreprocessingReviewState;
+  featureSuggestionState: FeatureSuggestionState;
+  transformState: TransformState;
+  targetColumn: string | null;
+  columnActions: Record<string, ColumnPreparationAction>;
+  finalizedFeatureColumns: string[] | null;
+  preprocessingChoices: PreprocessingChoices;
+  columnFilter: ColumnFilter;
+  columnSort: ColumnSort;
+}
+
 function formatPercent(value: number) {
   return `${value.toFixed(value < 10 && value > 0 ? 1 : 0)}%`;
+}
+
+function isHostedDataset(value: unknown): value is HostedDataset {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return (
+    typeof item.id === "string" &&
+    typeof item.name === "string" &&
+    typeof item.description === "string" &&
+    typeof item.fileName === "string" &&
+    typeof item.path === "string" &&
+    item.path.startsWith("/datasets/") &&
+    item.fileName.toLowerCase().endsWith(".csv")
+  );
+}
+
+function createCsvDatasetFile(csv: string, fileName: string) {
+  return new File([csv], fileName, {
+    type: "text/csv"
+  });
+}
+
+function createWorkspace(name = "Untitled workspace"): Workspace {
+  const timestamp = new Date().toISOString();
+
+  return {
+    id: `workspace-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    name,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+}
+
+function loadWorkspaces() {
+  try {
+    const raw = localStorage.getItem(WORKSPACES_STORAGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null;
+    if (!Array.isArray(parsed)) throw new Error("Invalid workspace list.");
+
+    const workspaces = parsed.filter(
+      (workspace): workspace is Workspace =>
+        Boolean(workspace) &&
+        typeof workspace === "object" &&
+        typeof (workspace as Workspace).id === "string" &&
+        typeof (workspace as Workspace).name === "string" &&
+        typeof (workspace as Workspace).createdAt === "string" &&
+        typeof (workspace as Workspace).updatedAt === "string"
+    );
+
+    if (workspaces.length > 0) return workspaces;
+  } catch {
+    // Fall through to a default workspace when stored data is unavailable.
+  }
+
+  return [createWorkspace("Workspace 1")];
+}
+
+function saveWorkspaces(workspaces: Workspace[]) {
+  localStorage.setItem(WORKSPACES_STORAGE_KEY, JSON.stringify(workspaces));
+}
+
+function getWorkspaceStateStorageKey(workspaceId: string) {
+  return `${WORKSPACE_STATE_STORAGE_PREFIX}${workspaceId}`;
+}
+
+function buildInitialPersistedWorkspaceState(): PersistedWorkspaceState {
+  return {
+    uploadState: { status: "idle" },
+    aiReviewState: { status: "idle" },
+    preprocessingReviewState: { status: "idle" },
+    featureSuggestionState: { status: "idle" },
+    transformState: { status: "idle" },
+    targetColumn: null,
+    columnActions: {},
+    finalizedFeatureColumns: null,
+    preprocessingChoices: {},
+    columnFilter: "all",
+    columnSort: { key: "notesCount", direction: "desc" }
+  };
+}
+
+function loadWorkspaceState(workspaceId: string): PersistedWorkspaceState {
+  try {
+    const raw = localStorage.getItem(getWorkspaceStateStorageKey(workspaceId));
+    if (!raw) return buildInitialPersistedWorkspaceState();
+
+    const parsed = JSON.parse(raw) as Partial<PersistedWorkspaceState>;
+    const initial = buildInitialPersistedWorkspaceState();
+
+    return {
+      ...initial,
+      ...parsed,
+      uploadState:
+        parsed.uploadState?.status === "ready" &&
+        typeof parsed.uploadState.csvText === "string" &&
+        typeof parsed.uploadState.fileName === "string"
+          ? parsed.uploadState
+          : { status: "idle" },
+      columnSort: parsed.columnSort ?? initial.columnSort
+    };
+  } catch {
+    return buildInitialPersistedWorkspaceState();
+  }
 }
 
 function hasProfilingNote(column: ColumnSummary, code: ProfilingNoteCode) {
@@ -371,9 +523,10 @@ function ToolPartView({
   return null;
 }
 
-function AgentChatSidebar() {
+function AgentChatSidebar({ workspaceId }: { workspaceId: string }) {
   const toasts = useKumoToastManager();
   const [connected, setConnected] = useState(false);
+  const [connectionError, setConnectionError] = useState(false);
   const [input, setInput] = useState("");
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
@@ -385,12 +538,16 @@ function AgentChatSidebar() {
 
   const agent = useAgent<ChatAgent>({
     agent: "ChatAgent",
-    onOpen: useCallback(() => setConnected(true), []),
+    name: workspaceId,
+    onOpen: useCallback(() => {
+      setConnected(true);
+      setConnectionError(false);
+    }, []),
     onClose: useCallback(() => setConnected(false), []),
-    onError: useCallback(
-      (error: Event) => console.error("Agent WebSocket error:", error),
-      []
-    ),
+    onError: useCallback((error: Event) => {
+      setConnectionError(true);
+      console.error("Agent WebSocket error:", error);
+    }, []),
     onMessage: useCallback(
       (message: MessageEvent) => {
         try {
@@ -521,7 +678,8 @@ function AgentChatSidebar() {
 
   const send = useCallback(async () => {
     const text = input.trim();
-    if ((!text && attachments.length === 0) || isStreaming) return;
+    if ((!text && attachments.length === 0) || isStreaming || !connected)
+      return;
 
     setInput("");
     const parts: Array<
@@ -543,7 +701,7 @@ function AgentChatSidebar() {
     setAttachments([]);
     sendMessage({ role: "user", parts });
     if (textareaRef.current) textareaRef.current.style.height = "auto";
-  }, [attachments, input, isStreaming, sendMessage]);
+  }, [attachments, connected, input, isStreaming, sendMessage]);
 
   const handlePaste = useCallback(
     (event: React.ClipboardEvent) => {
@@ -638,7 +796,7 @@ function AgentChatSidebar() {
                   key={prompt}
                   type="button"
                   disabled={!connected || isStreaming}
-                  className="text-left px-4 py-2 rounded-xl border border-kumo-line bg-kumo-base hover:border-kumo-brand/40 hover:bg-kumo-brand/5 transition-all text-xs text-kumo-subtle hover:text-kumo-default"
+                  className="text-left px-4 py-2 rounded-xl border border-kumo-line bg-kumo-base hover:border-kumo-brand/40 hover:bg-kumo-brand/5 transition-all text-xs text-kumo-subtle hover:text-kumo-default disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() =>
                     sendMessage({
                       role: "user",
@@ -806,6 +964,12 @@ function AgentChatSidebar() {
           </div>
         )}
 
+        {connectionError && !connected && (
+          <Text size="xs" DANGEROUS_className="mb-2 text-kumo-danger">
+            Agent connection failed. Check the local Worker and try again.
+          </Text>
+        )}
+
         <div className="flex items-end gap-2 rounded-lg border border-kumo-line bg-kumo-base p-2 focus-within:border-transparent focus-within:ring-2 focus-within:ring-kumo-ring">
           <Button
             type="button"
@@ -835,7 +999,7 @@ function AgentChatSidebar() {
             placeholder={
               connected ? "Message the agent..." : "Connecting to agent..."
             }
-            disabled={!connected || isStreaming}
+            disabled={isStreaming}
             rows={1}
             className="max-h-32 flex-1 resize-none bg-transparent! shadow-none! outline-none! ring-0! focus:ring-0!"
           />
@@ -874,14 +1038,14 @@ function PreviewTable({
   rows: Record<string, string | number | boolean | null>[];
 }) {
   return (
-    <div className="w-full max-w-full overflow-x-auto rounded-b-xl scrollbar-thin scrollbar-thumb-kumo-line scrollbar-track-transparent">
-      <table className="w-full min-w-[800px] text-left text-xs">
+    <div className="min-w-0 max-w-full overflow-x-auto rounded-b-xl scrollbar-thin scrollbar-thumb-kumo-line scrollbar-track-transparent">
+      <table className="w-max min-w-full table-fixed text-left text-xs">
         <thead className="bg-kumo-base/50 text-kumo-subtle sticky top-0 backdrop-blur-sm">
           <tr>
             {columns.slice(0, 20).map((column) => (
               <th
                 key={column.name}
-                className="truncate px-4 py-3 font-semibold uppercase tracking-wider"
+                className="w-48 truncate px-4 py-3 font-semibold uppercase tracking-wider"
                 title={column.name}
               >
                 {column.name}
@@ -903,7 +1067,7 @@ function PreviewTable({
               {columns.slice(0, 20).map((column) => (
                 <td
                   key={column.name}
-                  className="truncate px-4 py-3 text-kumo-subtle max-w-[200px]"
+                  className="w-48 truncate px-4 py-3 text-kumo-subtle"
                   title={renderPreviewValue(row[column.name])}
                 >
                   {renderPreviewValue(row[column.name])}
@@ -2347,7 +2511,7 @@ function PreparationReviewPanel({
             </div>
 
             {currentPreview && (
-              <div className="mt-4 rounded-xl border border-kumo-line bg-kumo-base p-5">
+              <div className="mt-4 min-w-0 rounded-xl border border-kumo-line bg-kumo-base p-5">
                 <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-center gap-2">
                     <Badge
@@ -2575,39 +2739,71 @@ function SortableColumnHeader({
   );
 }
 
-function DatasetWorkspace() {
+function DatasetWorkspace({
+  workspaceId,
+  workspaceName,
+  onWorkspaceUpdated
+}: {
+  workspaceId: string;
+  workspaceName: string;
+  onWorkspaceUpdated: () => void;
+}) {
   const toasts = useKumoToastManager();
   const csvInputRef = useRef<HTMLInputElement>(null);
+  const initialWorkspaceStateRef = useRef(loadWorkspaceState(workspaceId));
+  const initialUploadState = initialWorkspaceStateRef.current.uploadState;
   const [isCsvDragging, setIsCsvDragging] = useState(false);
-  const [uploadState, setUploadState] = useState<UploadState>({
-    status: "idle"
-  });
-  const [columnFilter, setColumnFilter] = useState<ColumnFilter>("all");
+  const [uploadState, setUploadState] = useState<UploadState>(() =>
+    initialUploadState.status === "ready"
+      ? {
+          status: "ready",
+          summary: initialUploadState.summary,
+          file: createCsvDatasetFile(
+            initialUploadState.csvText,
+            initialUploadState.fileName
+          ),
+          splitConfig: initialUploadState.splitConfig,
+          rowCount: initialUploadState.rowCount
+        }
+      : { status: "idle" }
+  );
+  const [columnFilter, setColumnFilter] = useState<ColumnFilter>(
+    initialWorkspaceStateRef.current.columnFilter
+  );
   const [columnSort, setColumnSort] = useState<ColumnSort>({
-    key: "notesCount",
-    direction: "desc"
+    key: initialWorkspaceStateRef.current.columnSort.key,
+    direction: initialWorkspaceStateRef.current.columnSort.direction
   });
   const [aiReviewState, setAiReviewState] = useState<AiReviewState>({
-    status: "idle"
+    ...initialWorkspaceStateRef.current.aiReviewState
   });
   const [preprocessingReviewState, setPreprocessingReviewState] =
     useState<PreprocessingReviewState>({
-      status: "idle"
+      ...initialWorkspaceStateRef.current.preprocessingReviewState
     });
   const [featureSuggestionState, setFeatureSuggestionState] =
-    useState<FeatureSuggestionState>({ status: "idle" });
+    useState<FeatureSuggestionState>(
+      initialWorkspaceStateRef.current.featureSuggestionState
+    );
   const [transformState, setTransformState] = useState<TransformState>({
-    status: "idle"
+    ...initialWorkspaceStateRef.current.transformState
   });
-  const [targetColumn, setTargetColumn] = useState<string | null>(null);
+  const [targetColumn, setTargetColumn] = useState<string | null>(
+    initialWorkspaceStateRef.current.targetColumn
+  );
   const [columnActions, setColumnActions] = useState<
     Record<string, ColumnPreparationAction>
-  >({});
+  >(initialWorkspaceStateRef.current.columnActions);
   const [finalizedFeatureColumns, setFinalizedFeatureColumns] = useState<
     string[] | null
-  >(null);
+  >(initialWorkspaceStateRef.current.finalizedFeatureColumns);
   const [preprocessingChoices, setPreprocessingChoices] =
-    useState<PreprocessingChoices>({});
+    useState<PreprocessingChoices>(
+      initialWorkspaceStateRef.current.preprocessingChoices
+    );
+  const [hostedDatasets, setHostedDatasets] = useState<HostedDataset[]>([]);
+  const [hostedDatasetCatalogState, setHostedDatasetCatalogState] =
+    useState<HostedDatasetCatalogState>({ status: "loading" });
 
   const currentSummary =
     uploadState.status === "ready" ? uploadState.summary : null;
@@ -2683,6 +2879,43 @@ function DatasetWorkspace() {
   }, []);
 
   useEffect(() => {
+    let active = true;
+
+    async function loadHostedDatasets() {
+      try {
+        const response = await fetch(DATASET_MANIFEST_PATH);
+        if (!response.ok) {
+          throw new Error("Dataset catalog could not be loaded.");
+        }
+
+        const manifest = (await response.json()) as unknown;
+        if (!Array.isArray(manifest) || !manifest.every(isHostedDataset)) {
+          throw new Error("Dataset catalog has an invalid format.");
+        }
+
+        if (!active) return;
+        setHostedDatasets(manifest);
+        setHostedDatasetCatalogState({ status: "ready" });
+      } catch (error) {
+        if (!active) return;
+        setHostedDatasetCatalogState({
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Dataset catalog could not be loaded."
+        });
+      }
+    }
+
+    void loadHostedDatasets();
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
     const context = currentSummary
       ? buildActiveDatasetContext({
           summary: currentSummary,
@@ -2709,6 +2942,73 @@ function DatasetWorkspace() {
     preprocessingChoices,
     preprocessingReviewState,
     targetColumn
+  ]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function persistWorkspaceState() {
+      const persistedUploadState: PersistedWorkspaceState["uploadState"] =
+        uploadState.status === "ready"
+          ? {
+              status: "ready",
+              summary: uploadState.summary,
+              csvText: await uploadState.file.text(),
+              fileName: uploadState.file.name,
+              splitConfig: uploadState.splitConfig,
+              rowCount: uploadState.rowCount
+            }
+          : { status: "idle" };
+
+      if (cancelled) return;
+
+      const nextState: PersistedWorkspaceState = {
+        uploadState: persistedUploadState,
+        aiReviewState,
+        preprocessingReviewState,
+        featureSuggestionState,
+        transformState:
+          transformState.status === "running"
+            ? { status: "idle" }
+            : transformState,
+        targetColumn,
+        columnActions,
+        finalizedFeatureColumns,
+        preprocessingChoices,
+        columnFilter,
+        columnSort
+      };
+
+      try {
+        localStorage.setItem(
+          getWorkspaceStateStorageKey(workspaceId),
+          JSON.stringify(nextState)
+        );
+        onWorkspaceUpdated();
+      } catch (error) {
+        console.warn("Workspace state could not be persisted.", error);
+      }
+    }
+
+    void persistWorkspaceState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    aiReviewState,
+    columnActions,
+    columnFilter,
+    columnSort,
+    featureSuggestionState,
+    finalizedFeatureColumns,
+    onWorkspaceUpdated,
+    preprocessingChoices,
+    preprocessingReviewState,
+    targetColumn,
+    transformState,
+    uploadState,
+    workspaceId
   ]);
 
   const resetWorkspace = useCallback(() => {
@@ -3285,6 +3585,29 @@ function DatasetWorkspace() {
     [handleCsvFile]
   );
 
+  const handleHostedDatasetSelect = useCallback(
+    async (dataset: HostedDataset) => {
+      try {
+        const response = await fetch(dataset.path);
+        if (!response.ok) {
+          throw new Error(`${dataset.name} could not be loaded.`);
+        }
+
+        const csv = await response.text();
+        await handleCsvFile(createCsvDatasetFile(csv, dataset.fileName));
+      } catch (error) {
+        setUploadState({
+          status: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "The selected dataset could not be loaded."
+        });
+      }
+    },
+    [handleCsvFile]
+  );
+
   const handleCsvDrop = useCallback(
     (event: React.DragEvent<HTMLDivElement>) => {
       event.preventDefault();
@@ -3295,6 +3618,11 @@ function DatasetWorkspace() {
     },
     [handleCsvFile]
   );
+
+  const datasetInputDisabled =
+    uploadState.status === "validating" || uploadState.status === "parsing";
+  const hostedDatasetInputDisabled =
+    datasetInputDisabled || hostedDatasetCatalogState.status !== "ready";
 
   return (
     <Surface
@@ -3331,11 +3659,11 @@ function DatasetWorkspace() {
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <Text size="lg" bold>
-              Active dataset
+              {workspaceName}
             </Text>
             <Text size="sm" variant="secondary">
-              Upload one CSV file to inspect columns and review preprocessing
-              recommendations.
+              Upload a CSV or choose a project dataset to inspect columns and
+              review preprocessing recommendations.
             </Text>
           </div>
           <div className="flex gap-2">
@@ -3356,13 +3684,48 @@ function DatasetWorkspace() {
               size="sm"
               icon={<PaperclipIcon size={14} />}
               onClick={() => csvInputRef.current?.click()}
-              disabled={
-                uploadState.status === "validating" ||
-                uploadState.status === "parsing"
-              }
+              disabled={datasetInputDisabled}
             >
               Choose CSV
             </Button>
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-4">
+            <div className="flex items-start gap-3">
+              <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
+                <PaperclipIcon size={18} />
+              </div>
+              <div className="min-w-0">
+                <Text size="sm" bold>
+                  Upload a CSV
+                </Text>
+                <Text size="xs" variant="secondary" DANGEROUS_className="mt-1">
+                  Use your own `.csv` file up to{" "}
+                  {formatBytes(MAX_CSV_SIZE_BYTES)}.
+                </Text>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-4">
+            <div className="flex items-start gap-3">
+              <div className="rounded-lg bg-kumo-success/10 p-2 text-kumo-success">
+                <DownloadSimpleIcon size={18} />
+              </div>
+              <div className="min-w-0">
+                <Text size="sm" bold>
+                  Try an example
+                </Text>
+                <Text size="xs" variant="secondary" DANGEROUS_className="mt-1">
+                  Choose one of the examples listed below
+                  {hostedDatasets.length > 0
+                    ? `: ${hostedDatasets.map((dataset) => dataset.name).join(", ")}.`
+                    : "."}
+                </Text>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -3400,15 +3763,51 @@ function DatasetWorkspace() {
               size="sm"
               icon={<PaperclipIcon size={14} />}
               onClick={() => csvInputRef.current?.click()}
-              disabled={
-                uploadState.status === "validating" ||
-                uploadState.status === "parsing"
-              }
+              disabled={datasetInputDisabled}
             >
               Choose File
             </Button>
           </div>
         </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          {hostedDatasets.map((dataset) => (
+            <button
+              key={dataset.id}
+              type="button"
+              disabled={hostedDatasetInputDisabled}
+              className="group rounded-xl border border-kumo-line bg-kumo-elevated p-4 text-left transition-all hover:border-kumo-brand/40 hover:bg-kumo-brand/5 disabled:cursor-not-allowed disabled:opacity-60"
+              onClick={() => void handleHostedDatasetSelect(dataset)}
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <Text size="sm" bold>
+                    {dataset.name}
+                  </Text>
+                  <Text
+                    size="xs"
+                    variant="secondary"
+                    DANGEROUS_className="mt-1"
+                  >
+                    {dataset.description}
+                  </Text>
+                </div>
+                <Badge variant="secondary">Dataset</Badge>
+              </div>
+            </button>
+          ))}
+        </div>
+
+        {hostedDatasetCatalogState.status === "loading" && (
+          <Badge variant="secondary" className="animate-pulse">
+            Loading project datasets...
+          </Badge>
+        )}
+        {hostedDatasetCatalogState.status === "error" && (
+          <div className="rounded-lg border border-kumo-warning/40 bg-kumo-warning/10 px-3 py-2">
+            <Text size="xs">{hostedDatasetCatalogState.message}</Text>
+          </div>
+        )}
 
         {uploadState.status === "validating" && (
           <Badge variant="secondary" className="animate-pulse">
@@ -3782,11 +4181,92 @@ function DatasetWorkspace() {
 
 function AppShell() {
   const [showChat, setShowChat] = useState(false);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>(() => {
+    const loaded = loadWorkspaces();
+    saveWorkspaces(loaded);
+    return loaded;
+  });
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState(() => {
+    const stored = localStorage.getItem(ACTIVE_WORKSPACE_STORAGE_KEY);
+    return workspaces.some((workspace) => workspace.id === stored)
+      ? stored!
+      : workspaces[0].id;
+  });
+
+  const activeWorkspace =
+    workspaces.find((workspace) => workspace.id === activeWorkspaceId) ??
+    workspaces[0];
+
+  const persistWorkspaceList = useCallback((nextWorkspaces: Workspace[]) => {
+    saveWorkspaces(nextWorkspaces);
+    setWorkspaces(nextWorkspaces);
+  }, []);
+
+  const selectWorkspace = useCallback((workspaceId: string) => {
+    localStorage.setItem(ACTIVE_WORKSPACE_STORAGE_KEY, workspaceId);
+    setActiveWorkspaceId(workspaceId);
+  }, []);
+
+  const addWorkspace = useCallback(() => {
+    const workspace = createWorkspace(`Workspace ${workspaces.length + 1}`);
+    persistWorkspaceList([workspace, ...workspaces]);
+    selectWorkspace(workspace.id);
+  }, [persistWorkspaceList, selectWorkspace, workspaces]);
+
+  const renameWorkspace = useCallback(() => {
+    const nextName = window.prompt("Workspace name", activeWorkspace.name);
+    const trimmed = nextName?.trim();
+    if (!trimmed) return;
+
+    const timestamp = new Date().toISOString();
+    persistWorkspaceList(
+      workspaces.map((workspace) =>
+        workspace.id === activeWorkspace.id
+          ? { ...workspace, name: trimmed, updatedAt: timestamp }
+          : workspace
+      )
+    );
+  }, [activeWorkspace, persistWorkspaceList, workspaces]);
+
+  const deleteWorkspace = useCallback(() => {
+    if (workspaces.length === 1) {
+      localStorage.removeItem(getWorkspaceStateStorageKey(activeWorkspace.id));
+      const replacement = createWorkspace("Workspace 1");
+      persistWorkspaceList([replacement]);
+      selectWorkspace(replacement.id);
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete "${activeWorkspace.name}" and its saved dataset state? Its chat history will remain in the agent store.`
+    );
+    if (!confirmed) return;
+
+    const nextWorkspaces = workspaces.filter(
+      (workspace) => workspace.id !== activeWorkspace.id
+    );
+    localStorage.removeItem(getWorkspaceStateStorageKey(activeWorkspace.id));
+    persistWorkspaceList(nextWorkspaces);
+    selectWorkspace(nextWorkspaces[0].id);
+  }, [activeWorkspace, persistWorkspaceList, selectWorkspace, workspaces]);
+
+  const markWorkspaceUpdated = useCallback(() => {
+    const timestamp = new Date().toISOString();
+    setWorkspaces((current) => {
+      const next = current.map((workspace) =>
+        workspace.id === activeWorkspaceId
+          ? { ...workspace, updatedAt: timestamp }
+          : workspace
+      );
+      saveWorkspaces(next);
+      return next;
+    });
+  }, [activeWorkspaceId]);
 
   return (
     <div className="min-h-screen bg-kumo-base text-kumo-default">
       <header className="sticky top-0 z-20 border-b border-kumo-line bg-kumo-base/80 backdrop-blur-sm">
-        <div className="mx-auto flex max-w-7xl items-center justify-between px-5 py-4">
+        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-5 py-4 md:flex-row md:items-center md:justify-between">
           <div className="flex flex-col">
             <Text size="lg" bold DANGEROUS_className="leading-tight">
               Automated FE
@@ -3795,7 +4275,45 @@ function AppShell() {
               CSV profiling and preprocessing workspace
             </Text>
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              value={activeWorkspace.id}
+              onChange={(event) => selectWorkspace(event.target.value)}
+              className="h-9 min-w-44 rounded-lg border border-kumo-line bg-kumo-elevated px-3 text-sm text-kumo-default outline-none focus:border-transparent focus:ring-2 focus:ring-kumo-ring"
+              aria-label="Select workspace"
+            >
+              {workspaces.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.name}
+                </option>
+              ))}
+            </select>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              onClick={renameWorkspace}
+            >
+              Rename
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              size="sm"
+              shape="square"
+              icon={<PlusIcon size={16} />}
+              aria-label="Add workspace"
+              onClick={addWorkspace}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              shape="square"
+              icon={<TrashIcon size={16} />}
+              aria-label="Delete workspace"
+              onClick={deleteWorkspace}
+            />
             <Button
               variant="secondary"
               size="sm"
@@ -3812,7 +4330,12 @@ function AppShell() {
 
       <main className="mx-auto max-w-7xl px-5 py-6">
         <div className="min-w-0 space-y-6">
-          <DatasetWorkspace />
+          <DatasetWorkspace
+            key={activeWorkspace.id}
+            workspaceId={activeWorkspace.id}
+            workspaceName={activeWorkspace.name}
+            onWorkspaceUpdated={markWorkspaceUpdated}
+          />
         </div>
         <aside
           className={`fixed inset-y-0 right-0 z-40 w-full max-w-[400px] border-l border-kumo-line bg-kumo-base p-5 shadow-2xl transition-transform duration-300 ease-in-out lg:w-[380px] lg:max-w-none ${
@@ -3835,7 +4358,10 @@ function AppShell() {
                 onClick={() => setShowChat(false)}
               />
             </div>
-            <AgentChatSidebar />
+            <AgentChatSidebar
+              key={activeWorkspace.id}
+              workspaceId={activeWorkspace.id}
+            />
           </div>
         </aside>
 
