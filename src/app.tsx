@@ -3274,17 +3274,18 @@ function AppShell() {
         </div>
       </header>
 
-      <main className="mx-auto grid max-w-7xl gap-6 px-5 py-6 lg:grid-cols-[1fr_380px]">
+      <main className="mx-auto max-w-7xl px-5 py-6">
         <div className="min-w-0 space-y-6">
           <DatasetWorkspace />
         </div>
         <aside
-          className={`fixed inset-y-0 right-0 z-30 w-full max-w-[400px] border-l border-kumo-line bg-kumo-base p-5 shadow-2xl transition-transform duration-300 ease-in-out lg:static lg:z-0 lg:block lg:w-auto lg:max-w-none lg:border-none lg:bg-transparent lg:p-0 lg:shadow-none lg:transition-none ${
-            showChat ? "translate-x-0" : "translate-x-full lg:translate-x-0"
+          className={`fixed inset-y-0 right-0 z-40 w-full max-w-[400px] border-l border-kumo-line bg-kumo-base p-5 shadow-2xl transition-transform duration-300 ease-in-out lg:w-[380px] lg:max-w-none ${
+            showChat ? "translate-x-0" : "translate-x-full"
           }`}
+          aria-hidden={!showChat}
         >
           <div className="flex h-full flex-col">
-            <div className="mb-4 flex items-center justify-between lg:hidden">
+            <div className="mb-4 flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <ChatCircleDotsIcon size={20} />
                 <Text bold>Agent Chat</Text>
@@ -3301,13 +3302,27 @@ function AppShell() {
             <AgentChatSidebar />
           </div>
         </aside>
+
+        {/* Floating toggle button (visible when chat is collapsed) */}
+        <div className="fixed bottom-5 right-5 z-50 lg:bottom-8 lg:right-8">
+          {!showChat && (
+            <Button
+              variant="primary"
+              shape="square"
+              size="lg"
+              icon={<ChatCircleDotsIcon size={20} />}
+              aria-label="Open chat"
+              onClick={() => setShowChat(true)}
+            />
+          )}
+        </div>
       </main>
 
       {showChat && (
         <button
           type="button"
-          aria-label="Close chat"
-          className="fixed inset-0 z-20 w-full h-full bg-kumo-contrast/10 backdrop-blur-[2px] lg:hidden cursor-default border-none p-0 outline-none"
+          aria-label="Close chat overlay"
+          className="fixed inset-0 z-30 w-full h-full bg-kumo-contrast/10 backdrop-blur-[2px] cursor-default border-none p-0 outline-none"
           onClick={() => setShowChat(false)}
         />
       )}
