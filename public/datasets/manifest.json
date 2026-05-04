@@ -1,0 +1,16 @@
+[
+  {
+    "id": "titanic",
+    "name": "Titanic survival",
+    "description": "Passenger demographics, ticket class, cabin details, fare, and survived target.",
+    "fileName": "Titanic-Dataset.csv",
+    "path": "/datasets/Titanic-Dataset.csv"
+  },
+  {
+    "id": "pet-adoption",
+    "name": "Pet adoption",
+    "description": "Shelter animal attributes, health status, fees, and adoption likelihood target.",
+    "fileName": "pet_adoption_data.csv",
+    "path": "/datasets/pet_adoption_data.csv"
+  }
+]
