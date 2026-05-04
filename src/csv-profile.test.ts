@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildAiReviewProfile,
   buildDatasetIntent,
+  isTrainingRow,
   parseCsvFile,
   transformCsvFile,
   type ColumnAssumption,
@@ -160,6 +161,48 @@ describe("parseCsvFile", () => {
 });
 
 describe("transformCsvFile", () => {
+  test("keeps split export row counts aligned with the training predicate", async () => {
+    const file = new File(
+      [
+        [
+          "id,feature,target",
+          "1,a,yes",
+          "2,b,no",
+          "3,c,yes",
+          "4,d,no",
+          "5,e,yes",
+          "6,f,no",
+          "7,g,yes"
+        ].join("\n")
+      ],
+      "split.csv",
+      { type: "text/csv" }
+    );
+
+    const result = await transformCsvFile(
+      file,
+      {
+        targetColumn: "target",
+        featureColumns: ["id", "feature"],
+        preprocessingSteps: []
+      },
+      { trainRatio: 0.7, seed: 42 }
+    );
+
+    if (!("trainCsv" in result)) {
+      throw new Error("Expected split export result.");
+    }
+
+    const expectedTrainCount = Array.from(
+      { length: 7 },
+      (_, index) => index
+    ).filter((index) => isTrainingRow(index, 42, 0.7)).length;
+
+    expect(result.trainRowCount).toBe(expectedTrainCount);
+    expect(result.testRowCount).toBe(7 - expectedTrainCount);
+    expect(result.trainRowCount + result.testRowCount).toBe(7);
+  });
+
   test("applies multiple steps to one feature and keeps target unchanged", async () => {
     const file = new File(
       [

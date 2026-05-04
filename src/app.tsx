@@ -7,6 +7,7 @@ import {
   MAX_CSV_SIZE_BYTES,
   buildAiReviewProfile,
   formatBytes,
+  isTrainingRow,
   parseCsvFile,
   renderPreviewValue,
   transformCsvFile,
@@ -61,6 +62,7 @@ type UploadState =
       summary: DatasetSummary;
       file: File;
       splitConfig?: SplitConfig;
+      rowCount: number;
     }
   | { status: "error"; message: string };
 
@@ -177,6 +179,21 @@ function filterColumn(column: ColumnSummary, filter: ColumnFilter) {
     case "likely_identifier":
       return hasProfilingNote(column, "likely_identifier");
   }
+}
+
+function countSplitRows(rowCount: number, seed: number, trainRatio: number) {
+  let trainCount = 0;
+
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
+    if (isTrainingRow(rowIndex, seed, trainRatio)) {
+      trainCount += 1;
+    }
+  }
+
+  return {
+    trainCount,
+    testCount: rowCount - trainCount
+  };
 }
 
 function ThemeToggle() {
@@ -2039,8 +2056,7 @@ function SplitConfigPanel({
 }) {
   const [trainRatio, setTrainRatio] = useState(0.7);
   const [seed, setSeed] = useState(42);
-  const trainCount = Math.round(rowCount * trainRatio);
-  const testCount = rowCount - trainCount;
+  const { trainCount, testCount } = countSplitRows(rowCount, seed, trainRatio);
 
   return (
     <div className="rounded-lg border border-kumo-line bg-kumo-elevated p-4">
@@ -2590,7 +2606,9 @@ function DatasetWorkspace() {
           status: "ready",
           summary,
           file: currentFile,
-          splitConfig
+          splitConfig,
+          rowCount:
+            uploadState.status === "choosing_split" ? uploadState.rowCount : 0
         });
         setAiReviewState({ status: "idle" });
         setPreprocessingReviewState({ status: "idle" });
@@ -2599,10 +2617,10 @@ function DatasetWorkspace() {
         setColumnActions({});
         setFinalizedFeatureColumns(null);
         setPreprocessingChoices({});
-        const heldOut = Math.round(
-          summary.parsedRowCount / splitConfig.trainRatio -
-            summary.parsedRowCount
-        );
+        const heldOut =
+          uploadState.status === "choosing_split"
+            ? uploadState.rowCount - summary.parsedRowCount
+            : 0;
         toasts.add({
           title: "Training set profiled",
           description: `${summary.parsedRowCount.toLocaleString()} training rows (${heldOut.toLocaleString()} held out as test).`
@@ -2938,8 +2956,13 @@ function DatasetWorkspace() {
                 </div>
                 {uploadState.status === "ready" && uploadState.splitConfig && (
                   <Text size="xs" DANGEROUS_className="text-kumo-success">
-                    {Math.round(uploadState.splitConfig.trainRatio * 100)}% of
-                    total
+                    {uploadState.rowCount.toLocaleString()} total rows split
+                    into {currentSummary.parsedRowCount.toLocaleString()} train
+                    and{" "}
+                    {(
+                      uploadState.rowCount - currentSummary.parsedRowCount
+                    ).toLocaleString()}{" "}
+                    test rows.
                   </Text>
                 )}
               </div>
@@ -2954,14 +2977,11 @@ function DatasetWorkspace() {
                 </Text>
                 <div className="flex items-baseline gap-2">
                   <Text size="lg" bold>
-                    {Math.round(
-                      currentSummary.parsedRowCount /
-                        (uploadState.status === "ready" &&
-                        uploadState.splitConfig
-                          ? uploadState.splitConfig.trainRatio
-                          : 1) -
-                        currentSummary.parsedRowCount
-                    ).toLocaleString()}
+                    {uploadState.status === "ready" && uploadState.splitConfig
+                      ? (
+                          uploadState.rowCount - currentSummary.parsedRowCount
+                        ).toLocaleString()
+                      : "0"}
                   </Text>
                   <Text size="xs" variant="secondary">
                     rows
@@ -3000,10 +3020,8 @@ function DatasetWorkspace() {
                 {uploadState.status === "ready" && uploadState.splitConfig && (
                   <Text size="xs">
                     Test set (
-                    {Math.round(
-                      currentSummary.parsedRowCount /
-                        uploadState.splitConfig.trainRatio -
-                        currentSummary.parsedRowCount
+                    {(
+                      uploadState.rowCount - currentSummary.parsedRowCount
                     ).toLocaleString()}{" "}
                     rows) is held out and excluded from all profiling, preview,
                     and statistics.
@@ -3230,7 +3248,6 @@ function DatasetWorkspace() {
               onPreprocessingChoiceChange={changePreprocessingChoice}
               onSendToChat={sendAiReviewToChat}
             />
-
           </div>
         ) : (
           <Empty
