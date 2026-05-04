@@ -1220,6 +1220,50 @@ function SelectBox({
   );
 }
 
+function CollapsibleSection({
+  title,
+  subtitle,
+  defaultOpen = true,
+  children
+}: {
+  title: string;
+  subtitle?: string;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-4 border-b border-kumo-line bg-kumo-base/30 p-5 text-left"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+      >
+        <div>
+          <Text size="base" bold>
+            {title}
+          </Text>
+          {subtitle && (
+            <Text size="xs" variant="secondary">
+              {subtitle}
+            </Text>
+          )}
+        </div>
+
+        {open ? (
+          <CaretUpIcon size={18} className="text-kumo-subtle" />
+        ) : (
+          <CaretDownIcon size={18} className="text-kumo-subtle" />
+        )}
+      </button>
+
+      {open && <div>{children}</div>}
+    </div>
+  );
+}
+
 function PreparationReviewPanel({
   summary,
   reviewState,
@@ -2972,63 +3016,12 @@ function DatasetWorkspace() {
                 ))}
               </div>
             )}
-
-            <div className="min-w-0 overflow-hidden rounded-lg border border-kumo-line bg-kumo-elevated">
-              <div className="border-b border-kumo-line px-3 py-2">
-                <Text size="sm" bold>
-                  Data preview
-                </Text>
-              </div>
-              <PreviewTable
-                columns={currentSummary.columns}
-                rows={currentSummary.previewRows}
-              />
-            </div>
-
-            <PreparationReviewPanel
-              summary={currentSummary}
-              reviewState={aiReviewState}
-              preprocessingState={preprocessingReviewState}
-              targetColumn={targetColumn}
-              columnActions={columnActions}
-              finalizedFeatureColumns={finalizedFeatureColumns}
-              preprocessingChoices={preprocessingChoices}
-              transformState={transformState}
-              onGenerate={() => void generateAiReview()}
-              onGeneratePreprocessing={() => void generatePreprocessingReview()}
-              onDownloadTransformed={() => void downloadTransformedDataset()}
-              onAcceptTarget={acceptTarget}
-              onTargetChange={changeTarget}
-              onFinishSelection={finishColumnSelection}
-              onColumnActionChange={changeColumnAction}
-              onPreprocessingChoiceChange={changePreprocessingChoice}
-              onSendToChat={sendAiReviewToChat}
-            />
-
-            <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+            <CollapsibleSection
+              title="Column Quality Analysis"
+              subtitle="Inspect and filter columns based on profiling results."
+              defaultOpen={true}
+            >
               <div className="flex flex-col gap-4 border-b border-kumo-line bg-kumo-base/30 p-5">
-                <div className="flex flex-wrap items-center justify-between gap-4">
-                  <div className="flex flex-col gap-1">
-                    <Text size="base" bold>
-                      Column Quality Analysis
-                    </Text>
-                    <Text size="xs" variant="secondary">
-                      Inspect and filter columns based on profiling results.
-                    </Text>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    <Badge variant="secondary" className="opacity-80">
-                      {columnQualityCounts.hasNotes} with notes
-                    </Badge>
-                    <Badge variant="secondary" className="opacity-80">
-                      {columnQualityCounts.highMissingness} high missingness
-                    </Badge>
-                    <Badge variant="secondary" className="opacity-80">
-                      {columnQualityCounts.likelyIdentifiers} IDs
-                    </Badge>
-                  </div>
-                </div>
-
                 <div className="flex flex-wrap gap-2">
                   {COLUMN_FILTERS.map((filter) => (
                     <button
@@ -3205,7 +3198,39 @@ function DatasetWorkspace() {
                   </div>
                 )}
               </div>
-            </div>
+            </CollapsibleSection>
+
+            <CollapsibleSection
+              title="Data Preview"
+              subtitle="Inspect the first few rows of the dataset."
+              defaultOpen={false}
+            >
+              <PreviewTable
+                columns={currentSummary.columns}
+                rows={currentSummary.previewRows}
+              />
+            </CollapsibleSection>
+
+            <PreparationReviewPanel
+              summary={currentSummary}
+              reviewState={aiReviewState}
+              preprocessingState={preprocessingReviewState}
+              targetColumn={targetColumn}
+              columnActions={columnActions}
+              finalizedFeatureColumns={finalizedFeatureColumns}
+              preprocessingChoices={preprocessingChoices}
+              transformState={transformState}
+              onGenerate={() => void generateAiReview()}
+              onGeneratePreprocessing={() => void generatePreprocessingReview()}
+              onDownloadTransformed={() => void downloadTransformedDataset()}
+              onAcceptTarget={acceptTarget}
+              onTargetChange={changeTarget}
+              onFinishSelection={finishColumnSelection}
+              onColumnActionChange={changeColumnAction}
+              onPreprocessingChoiceChange={changePreprocessingChoice}
+              onSendToChat={sendAiReviewToChat}
+            />
+
           </div>
         ) : (
           <Empty
