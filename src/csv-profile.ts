@@ -1,7 +1,8 @@
 import Papa from "papaparse";
 import {
-  evaluateFeatureExpression,
   getInputColumns,
+  isFeatureExpression,
+  materializeEngineeredFeatures,
   type ValidatedFeatureSuggestion
 } from "./feature-engineering";
 
@@ -1492,6 +1493,11 @@ function validateTransformationPlan(
   });
 
   (plan.engineeredFeatures ?? []).forEach((feature) => {
+    if (!isFeatureExpression(feature.expression)) {
+      throw new Error(
+        `${feature.name} cannot be generated because its expression is invalid.`
+      );
+    }
     if (fieldSet.has(feature.name) || preparedFeatureSet.has(feature.name)) {
       throw new Error(
         `${feature.name} cannot be generated because it already exists in the prepared dataset.`
@@ -1591,10 +1597,10 @@ function transformRow(
     output[columnName] = transformedValue;
   });
 
-  (plan.engineeredFeatures ?? []).forEach((feature) => {
-    output[feature.name] = formatEngineeredFeatureValue(
-      evaluateFeatureExpression(feature.expression, output)
-    );
+  Object.entries(
+    materializeEngineeredFeatures(output, plan.engineeredFeatures ?? [])
+  ).forEach(([featureName, value]) => {
+    output[featureName] = formatEngineeredFeatureValue(value);
   });
 
   output[plan.targetColumn] = getCell(row, plan.targetColumn);

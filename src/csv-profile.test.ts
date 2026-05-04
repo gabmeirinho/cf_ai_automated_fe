@@ -326,6 +326,44 @@ describe("transformCsvFile", () => {
     expect(transformed.audit).toContain("1 accepted engineered feature added.");
   });
 
+  test("materializes WeightOverAge into the exported CSV", async () => {
+    const file = new File(
+      ["Age,Weight,Outcome\n10,55,no\n0,80,yes"],
+      "weight-over-age.csv",
+      { type: "text/csv" }
+    );
+
+    const result = await transformCsvFile(file, {
+      targetColumn: "Outcome",
+      featureColumns: ["Age", "Weight"],
+      preprocessingSteps: [],
+      engineeredFeatures: [
+        {
+          expression: {
+            op: "ratio",
+            numerator: "Weight",
+            denominator: "Age"
+          },
+          name: "fe_WeightOverAge",
+          reason: "Normalizes weight by age.",
+          expectedBenefit: "Adds a scale-adjusted body measurement.",
+          warnings: []
+        }
+      ]
+    });
+    const transformed =
+      result as import("./csv-profile").CsvTransformationResult;
+
+    expect(transformed.outputColumns).toEqual([
+      "Age",
+      "Weight",
+      "fe_WeightOverAge",
+      "Outcome"
+    ]);
+    expect(transformed.csv).toContain("10,55,5.5,no");
+    expect(transformed.csv).toContain("0,80,,yes");
+  });
+
   test("exports engineered features from post-preprocessing columns", async () => {
     const file = new File(
       ["age,embarked,churn\n20,S,no\n40,C,yes"],
@@ -379,5 +417,32 @@ describe("transformCsvFile", () => {
         preprocessingSteps: [{ columnName: "churn", action: "Lowercase text" }]
       })
     ).rejects.toThrow("Target leakage blocked");
+  });
+
+  test("blocks engineered features with invalid expressions during export", async () => {
+    const file = new File(["age,income,churn\n20,1000,no"], "invalid-fe.csv", {
+      type: "text/csv"
+    });
+
+    await expect(
+      transformCsvFile(file, {
+        targetColumn: "churn",
+        featureColumns: ["age", "income"],
+        preprocessingSteps: [],
+        engineeredFeatures: [
+          {
+            expression: {
+              op: "unsupported",
+              numerator: "income",
+              denominator: "age"
+            },
+            name: "fe_income_to_age",
+            reason: "Invalid runtime expression.",
+            expectedBenefit: "Should be blocked.",
+            warnings: []
+          } as unknown as import("./feature-engineering").ValidatedFeatureSuggestion
+        ]
+      })
+    ).rejects.toThrow("expression is invalid");
   });
 });

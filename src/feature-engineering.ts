@@ -185,15 +185,26 @@ export function applyValidatedFeatureSuggestions(
   return data.map((row) => {
     const newRow: Record<string, unknown> = { ...row };
 
-    for (const suggestion of suggestions) {
-      newRow[suggestion.name] = evaluateFeatureExpression(
-        suggestion.expression,
-        row
-      );
-    }
+    Object.assign(newRow, materializeEngineeredFeatures(row, suggestions));
 
     return newRow;
   });
+}
+
+export function materializeEngineeredFeatures(
+  row: Record<string, unknown>,
+  suggestions: ValidatedFeatureSuggestion[]
+): Record<string, number | null> {
+  const materialized: Record<string, number | null> = {};
+
+  for (const suggestion of suggestions) {
+    materialized[suggestion.name] = evaluateFeatureExpression(
+      suggestion.expression,
+      row
+    );
+  }
+
+  return materialized;
 }
 
 export function evaluateFeatureExpression(

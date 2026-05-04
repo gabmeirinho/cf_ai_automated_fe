@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   applyValidatedFeatureSuggestions,
+  materializeEngineeredFeatures,
   validateFeatureSuggestions,
   type FeatureValidationContext
 } from "./feature-engineering";
@@ -177,6 +178,63 @@ describe("validateFeatureSuggestions", () => {
     expect(result.rejected).toHaveLength(2);
     expect(result.rejected[0]?.reason).toContain("duplicated");
     expect(result.rejected[1]?.reason).toContain("already exists");
+  });
+});
+
+describe("materializeEngineeredFeatures", () => {
+  test("materializes WeightOverAge from a validated ratio expression", () => {
+    const features = validateFeatureSuggestions(
+      [
+        {
+          expression: {
+            op: "ratio",
+            numerator: "Weight",
+            denominator: "Age"
+          },
+          name: "WeightOverAge",
+          reason: "Normalizes weight by age.",
+          expectedBenefit: "Adds a scale-adjusted body measurement."
+        }
+      ],
+      baseContext({
+        availableColumns: ["Age", "Weight"],
+        numericColumns: ["Age", "Weight"],
+        existingColumns: ["Age", "Weight", "Outcome"],
+        targetColumn: "Outcome"
+      })
+    ).accepted;
+
+    expect(features[0]?.name).toBe("fe_WeightOverAge");
+    expect(
+      materializeEngineeredFeatures({ Age: "10", Weight: "55" }, features)
+    ).toEqual({ fe_WeightOverAge: 5.5 });
+  });
+
+  test("materializes invalid ratio inputs as null", () => {
+    const features = validateFeatureSuggestions(
+      [
+        {
+          expression: {
+            op: "ratio",
+            numerator: "Weight",
+            denominator: "Age"
+          },
+          name: "WeightOverAge",
+          reason: "Normalizes weight by age.",
+          expectedBenefit: "Adds a scale-adjusted body measurement."
+        }
+      ],
+      baseContext({
+        availableColumns: ["Age", "Weight"],
+        numericColumns: ["Age", "Weight"],
+        existingColumns: ["Age", "Weight", "Outcome"],
+        targetColumn: "Outcome"
+      })
+    ).accepted;
+
+    expect(
+      materializeEngineeredFeatures({ Age: "0", Weight: "55" }, features)
+    ).toEqual({ fe_WeightOverAge: null });
   });
 });
 
