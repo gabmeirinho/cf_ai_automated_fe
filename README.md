@@ -12,8 +12,6 @@ The current version focuses on **CSV profiling, AI-assisted review, deterministi
 ![Automated FE demo](https://github.com/user-attachments/assets/6fb78488-6f12-469b-944d-a837d48d0327)
 ```
 
-Keep large videos out of the repository when possible. Use GitHub user attachments, a release asset, or another video host for the full recording.
-
 ---
 
 ## Why this project?
