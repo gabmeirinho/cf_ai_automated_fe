@@ -11,6 +11,10 @@ import {
   type ModelMessage
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
+import {
+  validateFeatureSuggestions,
+  type FeatureValidationContext
+} from "./feature-engineering";
 import { z } from "zod";
 
 const DEFAULT_AI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
@@ -1023,6 +1027,110 @@ Input profile:
 ${JSON.stringify(profile)}`;
 }
 
+function buildFeatureSuggestionPrompt(profile: ReviewProfile) {
+  const columns = profile.columns.map((c) => c.name);
+
+  return `Return JSON only. Do not use Markdown. Do not include prose before or after the JSON.
+
+Provide an array called "suggestions" containing suggested features derived from the input columns. Each suggestion must match this shape:
+{
+  "expression": { /* one of the allowed feature expressions: log1p, sqrt, square, ratio, difference, product, date_year, date_month, date_dayofweek */ },
+  "name": "optional short name for the feature",
+  "reason": "short explanation of why this feature is useful",
+  "expectedBenefit": "short statement of expected benefit",
+  "riskNotes": ["optional list of short risk notes"]
+}
+
+Use exact column names from the input for any column references. Prefer short, deterministic JSON values. Return an object: {"suggestions": [ ... ]}.
+
+Input columns:
+${JSON.stringify(columns)}
+
+Preview rows (first 10):
+${JSON.stringify(profile.previewRows.slice(0, 10))}`;
+}
+
+function parseFeatureSuggestionsText(text: string) {
+  const jsonText = extractJsonObject(text);
+  if (!jsonText) {
+    return { success: false as const, error: "No JSON object found in model output" };
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText);
+    if (!parsed || typeof parsed !== "object") {
+      return { success: false as const, error: "Parsed JSON is not an object" };
+    }
+
+    const suggestions = Array.isArray((parsed as any).suggestions)
+      ? (parsed as any).suggestions
+      : [];
+
+    return { success: true as const, suggestions };
+  } catch (err: any) {
+    return { success: false as const, error: String(err) };
+  }
+}
+
+async function handleFeatureSuggestions(request: Request, env: Env) {
+  if (request.method !== "POST") {
+    return new Response("Method not allowed", { status: 405 });
+  }
+
+  const body = await request.json().catch(() => null);
+  const profile = (body as { profile?: unknown } | null)?.profile as
+    | ReviewProfile
+    | undefined;
+
+  if (!profile) {
+    return Response.json({ error: "Request must include a valid compact dataset profile." }, { status: 400 });
+  }
+
+  const workersai = createWorkersAI({ binding: env.AI });
+  const model = env.AI_MODEL || DEFAULT_AI_MODEL;
+
+  const result = await generateTextWithRetries({
+    model: workersai(model),
+    ...JSON_GENERATION_SETTINGS,
+    system: "You suggest feature engineering transformations. Output JSON only.",
+    prompt: buildFeatureSuggestionPrompt(profile)
+  });
+
+  if (!result || typeof result.text !== "string") {
+    console.warn("AI feature-suggestions call returned no text", { result });
+    return Response.json({ accepted: [], rejected: [] });
+  }
+
+  const parsed = parseFeatureSuggestionsText(result.text);
+  if (!parsed.success) {
+    console.warn("AI feature-suggestions response could not be parsed", {
+      error: parsed.error,
+      generatedText: result.text.slice(0, 500)
+    });
+    return Response.json({ accepted: [], rejected: [] });
+  }
+
+  const availableColumns = profile.columns.map((c) => c.name);
+  const numericColumns = profile.columns
+    .filter((c) => c.inferredType === "number")
+    .map((c) => c.name);
+  const dateColumns = profile.columns
+    .filter((c) => c.inferredType === "date")
+    .map((c) => c.name);
+
+  const context: FeatureValidationContext = {
+    availableColumns,
+    numericColumns,
+    dateColumns,
+    targetColumn: undefined,
+    blockedColumns: []
+  };
+
+  const validation = validateFeatureSuggestions(parsed.suggestions, context);
+
+  return Response.json(validation);
+}
+
 function buildColumnPreprocessingPrompt({
   profile,
   targetColumn,
@@ -1507,6 +1615,9 @@ export default {
     }
     if (url.pathname === "/api/ai-review") {
       return await handleAiReview(request, env);
+    }
+    if (url.pathname === "/api/feature-suggestions") {
+      return await handleFeatureSuggestions(request, env);
     }
 
     return (
