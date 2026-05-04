@@ -7,8 +7,10 @@ import type {
   FeatureValidationResult,
   ValidatedFeatureSuggestion
 } from "./feature-engineering";
+import { materializeEngineeredFeatures } from "./feature-engineering";
 import {
   MAX_CSV_SIZE_BYTES,
+  buildPreparedFeatureContext,
   buildAiReviewProfile,
   formatBytes,
   isTrainingRow,
@@ -1434,6 +1436,49 @@ function PreparationReviewPanel({
   const acceptedEngineeredFeatures = getAcceptedFeatureSuggestions(
     featureSuggestionState
   );
+  const currentPreview = useMemo(() => {
+    if (!targetColumn || !isSelectionFinalized) return null;
+
+    const selectedFeatureNames = featureColumns.map((item) => item.column.name);
+    const preprocessingSteps = buildSelectedPreprocessingSteps(
+      preprocessingChoices
+    ).filter((step) => selectedFeatureNames.includes(step.columnName));
+    const preparedContext = buildPreparedFeatureContext(
+      buildAiReviewProfile(summary),
+      selectedFeatureNames,
+      preprocessingSteps
+    );
+    const columns = [
+      ...preparedContext.columns.map((column) => ({ name: column.name })),
+      ...acceptedEngineeredFeatures.map((feature) => ({ name: feature.name })),
+      { name: targetColumn }
+    ];
+    const rows = preparedContext.previewRows.map((row, rowIndex) => {
+      const previewRow: Record<string, string | number | boolean | null> = {
+        ...row
+      };
+
+      Object.entries(
+        materializeEngineeredFeatures(row, acceptedEngineeredFeatures)
+      ).forEach(([featureName, value]) => {
+        previewRow[featureName] = value;
+      });
+
+      previewRow[targetColumn] =
+        summary.previewRows[rowIndex]?.[targetColumn] ?? null;
+
+      return previewRow;
+    });
+
+    return { columns, rows };
+  }, [
+    acceptedEngineeredFeatures,
+    featureColumns,
+    isSelectionFinalized,
+    preprocessingChoices,
+    summary,
+    targetColumn
+  ]);
   const featureDecisionCounts =
     featureSuggestionState.status === "ready"
       ? featureSuggestionState.result.accepted.reduce(
@@ -2300,6 +2345,37 @@ function PreparationReviewPanel({
                 </div>
               )}
             </div>
+
+            {currentPreview && (
+              <div className="mt-4 rounded-xl border border-kumo-line bg-kumo-base p-5">
+                <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                  <div className="flex items-center gap-2">
+                    <Badge
+                      variant="secondary"
+                      className="text-[10px] font-bold uppercase tracking-widest"
+                    >
+                      Current Dataset Preview
+                    </Badge>
+                    {acceptedEngineeredFeatures.length > 0 && (
+                      <Badge
+                        variant="secondary"
+                        className="border-kumo-success/20 bg-kumo-success/10 text-[10px] text-kumo-success"
+                      >
+                        {acceptedEngineeredFeatures.length} engineered
+                      </Badge>
+                    )}
+                  </div>
+                  <Text size="xs" variant="secondary">
+                    {currentPreview.rows.length.toLocaleString()} preview rows,{" "}
+                    {currentPreview.columns.length.toLocaleString()} columns
+                  </Text>
+                </div>
+                <PreviewTable
+                  columns={currentPreview.columns}
+                  rows={currentPreview.rows}
+                />
+              </div>
+            )}
 
             <div className="mt-8 flex flex-col gap-4 border-t border-kumo-line pt-6 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex flex-col gap-1">
