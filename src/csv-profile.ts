@@ -1,4 +1,9 @@
 import Papa from "papaparse";
+import {
+  evaluateFeatureExpression,
+  getInputColumns,
+  type ValidatedFeatureSuggestion
+} from "./feature-engineering";
 
 export const MAX_CSV_SIZE_BYTES = 10 * 1024 * 1024;
 const MAX_INFERENCE_ROWS = 1000;
@@ -171,6 +176,7 @@ export interface CsvTransformationPlan {
   targetColumn: string;
   featureColumns: string[];
   preprocessingSteps: SelectedPreprocessingStep[];
+  engineeredFeatures?: ValidatedFeatureSuggestion[];
 }
 
 export interface CsvTransformationResult {
@@ -1305,6 +1311,7 @@ function validateTransformationPlan(
 ) {
   const fieldSet = new Set(fields);
   const featureSet = new Set(plan.featureColumns);
+  const generatedFeatureNames = new Set<string>();
 
   if (!fieldSet.has(plan.targetColumn)) {
     throw new Error("The target column is not present in the CSV.");
@@ -1332,6 +1339,42 @@ function validateTransformationPlan(
       throw new Error(`${step.action} is not a supported export transform.`);
     }
   });
+
+  (plan.engineeredFeatures ?? []).forEach((feature) => {
+    if (fieldSet.has(feature.name)) {
+      throw new Error(
+        `${feature.name} cannot be generated because it already exists in the CSV.`
+      );
+    }
+    if (generatedFeatureNames.has(feature.name)) {
+      throw new Error(
+        `${feature.name} cannot be generated more than once in the same export.`
+      );
+    }
+    generatedFeatureNames.add(feature.name);
+
+    getInputColumns(feature.expression).forEach((columnName) => {
+      if (columnName === plan.targetColumn) {
+        throw new Error(
+          "Target leakage blocked: engineered features cannot use the target."
+        );
+      }
+      if (!fieldSet.has(columnName)) {
+        throw new Error(
+          `${feature.name} references ${columnName}, which is not present in the CSV.`
+        );
+      }
+      if (!featureSet.has(columnName)) {
+        throw new Error(
+          `${feature.name} references ${columnName}, which is not a kept feature.`
+        );
+      }
+    });
+  });
+}
+
+function formatEngineeredFeatureValue(value: number | null) {
+  return value === null ? "" : String(value);
 }
 
 function transformRow(
@@ -1373,6 +1416,12 @@ function transformRow(
     }
 
     output[columnName] = transformedValue;
+  });
+
+  (plan.engineeredFeatures ?? []).forEach((feature) => {
+    output[feature.name] = formatEngineeredFeatureValue(
+      evaluateFeatureExpression(feature.expression, row)
+    );
   });
 
   output[plan.targetColumn] = getCell(row, plan.targetColumn);
@@ -1477,6 +1526,7 @@ export async function transformCsvFile(
     const audit = [
       `Target ${plan.targetColumn} was kept unchanged and excluded from feature transforms.`,
       `${plan.featureColumns.length.toLocaleString()} feature column${plan.featureColumns.length === 1 ? "" : "s"} were eligible for export.`,
+      `${(plan.engineeredFeatures ?? []).length.toLocaleString()} accepted engineered feature${(plan.engineeredFeatures ?? []).length === 1 ? "" : "s"} added.`,
       `${plan.preprocessingSteps.filter((step) => !isNoStepAction(step.action)).length.toLocaleString()} preprocessing step${plan.preprocessingSteps.length === 1 ? "" : "s"} applied.`,
       `Fitted statistics computed from training set only.`,
       `${testRows.length.toLocaleString()} test rows held out during fit.`
@@ -1510,6 +1560,7 @@ export async function transformCsvFile(
   const audit = [
     `Target ${plan.targetColumn} was kept unchanged and excluded from feature transforms.`,
     `${plan.featureColumns.length.toLocaleString()} feature column${plan.featureColumns.length === 1 ? "" : "s"} were eligible for export.`,
+    `${(plan.engineeredFeatures ?? []).length.toLocaleString()} accepted engineered feature${(plan.engineeredFeatures ?? []).length === 1 ? "" : "s"} added.`,
     `${plan.preprocessingSteps.filter((step) => !isNoStepAction(step.action)).length.toLocaleString()} preprocessing step${plan.preprocessingSteps.length === 1 ? "" : "s"} applied.`,
     "No transform reads from the target column."
   ];

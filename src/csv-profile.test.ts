@@ -243,6 +243,44 @@ describe("transformCsvFile", () => {
     );
   });
 
+  test("exports only approved engineered features", async () => {
+    const file = new File(
+      ["age,income,churn\n20,1000,no\n40,4000,yes"],
+      "features.csv",
+      { type: "text/csv" }
+    );
+
+    const result = await transformCsvFile(file, {
+      targetColumn: "churn",
+      featureColumns: ["age", "income"],
+      preprocessingSteps: [],
+      engineeredFeatures: [
+        {
+          expression: {
+            op: "ratio",
+            numerator: "income",
+            denominator: "age"
+          },
+          name: "fe_income_to_age",
+          reason: "Normalizes income by age.",
+          expectedBenefit: "Adds a scale-adjusted income signal.",
+          warnings: []
+        }
+      ]
+    });
+    const transformed =
+      result as import("./csv-profile").CsvTransformationResult;
+
+    expect(transformed.outputColumns).toEqual([
+      "age",
+      "income",
+      "fe_income_to_age",
+      "churn"
+    ]);
+    expect(transformed.csv).toContain("20,1000,50,no");
+    expect(transformed.audit).toContain("1 accepted engineered feature added.");
+  });
+
   test("blocks target leakage in preprocessing steps", async () => {
     const file = new File(["age,churn\n32,yes"], "leak.csv", {
       type: "text/csv"

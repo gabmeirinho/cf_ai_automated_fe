@@ -3,7 +3,10 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { ChatAgent } from "./server";
-import type { FeatureValidationResult } from "./feature-engineering";
+import type {
+  FeatureValidationResult,
+  ValidatedFeatureSuggestion
+} from "./feature-engineering";
 import {
   MAX_CSV_SIZE_BYTES,
   buildAiReviewProfile,
@@ -107,8 +110,16 @@ type PreprocessingReviewState =
 type FeatureSuggestionState =
   | { status: "idle" }
   | { status: "loading" }
-  | { status: "ready"; result: FeatureValidationResult }
+  | {
+      status: "ready";
+      result: FeatureValidationResult;
+      decisions: FeatureSuggestionDecisions;
+    }
   | { status: "error"; message: string };
+
+type FeatureSuggestionDecision = "accepted" | "denied";
+
+type FeatureSuggestionDecisions = Record<string, FeatureSuggestionDecision>;
 
 type TransformState =
   | { status: "idle" }
@@ -1207,6 +1218,24 @@ function selectedNonNoStepChoices(choices: PreprocessingChoice[]) {
   return choices.filter((choice) => !isNoPreprocessingChoice(choice));
 }
 
+function getFeatureSuggestionKey(
+  feature: ValidatedFeatureSuggestion,
+  index: number
+) {
+  return `${feature.name}:${index}`;
+}
+
+function getAcceptedFeatureSuggestions(
+  state: FeatureSuggestionState
+): ValidatedFeatureSuggestion[] {
+  if (state.status !== "ready") return [];
+
+  return state.result.accepted.filter(
+    (feature, index) =>
+      state.decisions[getFeatureSuggestionKey(feature, index)] === "accepted"
+  );
+}
+
 function buildSelectedPreprocessingSteps(
   choices: PreprocessingChoices
 ): SelectedPreprocessingStep[] {
@@ -1301,6 +1330,7 @@ function PreparationReviewPanel({
   onGeneratePreprocessing,
   featureSuggestionState,
   onGenerateFeatures,
+  onFeatureSuggestionDecision,
   onDownloadTransformed,
   onAcceptTarget,
   onTargetChange,
@@ -1321,6 +1351,10 @@ function PreparationReviewPanel({
   onGeneratePreprocessing: () => void;
   featureSuggestionState: FeatureSuggestionState;
   onGenerateFeatures: () => void;
+  onFeatureSuggestionDecision: (
+    featureKey: string,
+    decision: FeatureSuggestionDecision
+  ) => void;
   onDownloadTransformed: () => void;
   onAcceptTarget: (columnName: string) => void;
   onTargetChange: (columnName: string) => void;
@@ -1397,6 +1431,25 @@ function PreparationReviewPanel({
       item.selectedAction === "feature" &&
       selectedNonNoStepChoices(item.selectedPreprocessing).length > 0
   );
+  const acceptedEngineeredFeatures = getAcceptedFeatureSuggestions(
+    featureSuggestionState
+  );
+  const featureDecisionCounts =
+    featureSuggestionState.status === "ready"
+      ? featureSuggestionState.result.accepted.reduce(
+          (counts, feature, index) => {
+            const decision =
+              featureSuggestionState.decisions[
+                getFeatureSuggestionKey(feature, index)
+              ];
+            if (decision === "accepted") counts.accepted += 1;
+            else if (decision === "denied") counts.denied += 1;
+            else counts.pending += 1;
+            return counts;
+          },
+          { accepted: 0, denied: 0, pending: 0 }
+        )
+      : { accepted: 0, denied: 0, pending: 0 };
   const workflowSteps = [
     {
       label: "1. Target",
@@ -1966,68 +2019,141 @@ function PreparationReviewPanel({
                 <div className="grid gap-4">
                   {featureSuggestionState.result.accepted.length > 0 && (
                     <div>
-                      <div className="mb-3 flex items-center gap-2">
-                        <CheckCircleIcon
-                          size={16}
-                          className="text-kumo-success"
-                        />
-                        <Text size="sm" bold>
-                          Accepted (
-                          {featureSuggestionState.result.accepted.length})
+                      <div className="mb-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex items-center gap-2">
+                          <CheckCircleIcon
+                            size={16}
+                            className="text-kumo-success"
+                          />
+                          <Text size="sm" bold>
+                            Valid suggestions (
+                            {featureSuggestionState.result.accepted.length})
+                          </Text>
+                        </div>
+                        <Text size="xs" variant="secondary">
+                          {featureDecisionCounts.accepted} accepted,{" "}
+                          {featureDecisionCounts.denied} denied,{" "}
+                          {featureDecisionCounts.pending} pending
                         </Text>
                       </div>
                       <div className="grid gap-2">
                         {featureSuggestionState.result.accepted.map(
-                          (feature, idx) => (
-                            <div
-                              key={`${feature.name}-${idx}`}
-                              className="rounded-lg border border-kumo-success/30 bg-kumo-success/5 p-3"
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="flex-1">
-                                  <Text
-                                    size="sm"
-                                    bold
-                                    DANGEROUS_className="text-kumo-default"
-                                  >
-                                    {feature.name}
-                                  </Text>
-                                  <Text
-                                    size="xs"
-                                    variant="secondary"
-                                    DANGEROUS_className="mt-1"
-                                  >
-                                    {feature.reason}
-                                  </Text>
-                                  <Text
-                                    size="xs"
-                                    DANGEROUS_className="mt-1 text-kumo-brand"
-                                  >
-                                    Expected benefit: {feature.expectedBenefit}
-                                  </Text>
-                                  {feature.warnings.length > 0 && (
-                                    <div className="mt-2 flex flex-wrap gap-1">
-                                      {feature.warnings.map(
-                                        (warning, warningIndex) => (
-                                          <Badge
-                                            key={`${feature.name}-${warningIndex}`}
-                                            variant="secondary"
-                                            className="bg-kumo-warning/10 text-kumo-warning border-kumo-warning/20 text-[10px]"
-                                          >
-                                            {warning}
-                                          </Badge>
-                                        )
-                                      )}
+                          (feature, idx) => {
+                            const featureKey = getFeatureSuggestionKey(
+                              feature,
+                              idx
+                            );
+                            const decision =
+                              featureSuggestionState.decisions[featureKey];
+                            const isAccepted = decision === "accepted";
+                            const isDenied = decision === "denied";
+
+                            return (
+                              <div
+                                key={featureKey}
+                                className={`rounded-lg border p-3 ${
+                                  isAccepted
+                                    ? "border-kumo-success/30 bg-kumo-success/5"
+                                    : isDenied
+                                      ? "border-kumo-danger/30 bg-kumo-danger/5"
+                                      : "border-kumo-line bg-kumo-base/50"
+                                }`}
+                              >
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                  <div className="flex-1">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <Text
+                                        size="sm"
+                                        bold
+                                        DANGEROUS_className="text-kumo-default"
+                                      >
+                                        {feature.name}
+                                      </Text>
+                                      <Badge
+                                        variant="secondary"
+                                        className={`text-[10px] ${
+                                          isAccepted
+                                            ? "border-kumo-success/20 bg-kumo-success/10 text-kumo-success"
+                                            : isDenied
+                                              ? "border-kumo-danger/20 bg-kumo-danger/10 text-kumo-danger"
+                                              : ""
+                                        }`}
+                                      >
+                                        {isAccepted
+                                          ? "Accepted"
+                                          : isDenied
+                                            ? "Denied"
+                                            : "Pending"}
+                                      </Badge>
                                     </div>
-                                  )}
+                                    <Text
+                                      size="xs"
+                                      variant="secondary"
+                                      DANGEROUS_className="mt-1"
+                                    >
+                                      {feature.reason}
+                                    </Text>
+                                    <Text
+                                      size="xs"
+                                      DANGEROUS_className="mt-1 text-kumo-brand"
+                                    >
+                                      Expected benefit:{" "}
+                                      {feature.expectedBenefit}
+                                    </Text>
+                                    {feature.warnings.length > 0 && (
+                                      <div className="mt-2 flex flex-wrap gap-1">
+                                        {feature.warnings.map(
+                                          (warning, warningIndex) => (
+                                            <Badge
+                                              key={`${feature.name}-${warningIndex}`}
+                                              variant="secondary"
+                                              className="bg-kumo-warning/10 text-kumo-warning border-kumo-warning/20 text-[10px]"
+                                            >
+                                              {warning}
+                                            </Badge>
+                                          )
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                  <div className="flex flex-shrink-0 gap-2">
+                                    <Button
+                                      type="button"
+                                      variant={
+                                        isAccepted ? "primary" : "secondary"
+                                      }
+                                      size="sm"
+                                      icon={<CheckCircleIcon size={14} />}
+                                      disabled={isAccepted}
+                                      onClick={() =>
+                                        onFeatureSuggestionDecision(
+                                          featureKey,
+                                          "accepted"
+                                        )
+                                      }
+                                    >
+                                      Accept
+                                    </Button>
+                                    <Button
+                                      type="button"
+                                      variant="secondary"
+                                      size="sm"
+                                      icon={<XCircleIcon size={14} />}
+                                      disabled={isDenied}
+                                      onClick={() =>
+                                        onFeatureSuggestionDecision(
+                                          featureKey,
+                                          "denied"
+                                        )
+                                      }
+                                    >
+                                      Deny
+                                    </Button>
+                                  </div>
                                 </div>
-                                <CheckCircleIcon
-                                  size={18}
-                                  className="text-kumo-success flex-shrink-0"
-                                />
                               </div>
-                            </div>
-                          )
+                            );
+                          }
                         )}
                       </div>
                     </div>
@@ -2138,6 +2264,33 @@ function PreparationReviewPanel({
               ) : (
                 <div className="flex items-center gap-2 text-kumo-inactive">
                   <Text size="sm">No custom transformations selected.</Text>
+                </div>
+              )}
+              {acceptedEngineeredFeatures.length > 0 && (
+                <div className="mt-4 border-t border-kumo-line pt-4">
+                  <Text
+                    size="xs"
+                    bold
+                    variant="secondary"
+                    DANGEROUS_className="mb-3 uppercase tracking-widest"
+                  >
+                    Engineered Features
+                  </Text>
+                  <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                    {acceptedEngineeredFeatures.map((feature) => (
+                      <div
+                        key={feature.name}
+                        className="flex flex-col gap-1 border-l-2 border-kumo-success/40 pl-3"
+                      >
+                        <Text size="xs" bold DANGEROUS_className="truncate">
+                          {feature.name}
+                        </Text>
+                        <Text size="xs" variant="secondary">
+                          {feature.expectedBenefit}
+                        </Text>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -2698,7 +2851,14 @@ function DatasetWorkspace() {
         uploadState.status === "ready" ? uploadState.splitConfig : undefined;
       const result = await transformCsvFile(
         currentFile,
-        { targetColumn, featureColumns, preprocessingSteps },
+        {
+          targetColumn,
+          featureColumns,
+          preprocessingSteps,
+          engineeredFeatures: getAcceptedFeatureSuggestions(
+            featureSuggestionState
+          )
+        },
         splitConfig
       );
 
@@ -2782,6 +2942,7 @@ function DatasetWorkspace() {
     currentSummary,
     finalizedFeatureColumns,
     preprocessingChoices,
+    featureSuggestionState,
     targetColumn,
     toasts,
     uploadState
@@ -2940,7 +3101,7 @@ function DatasetWorkspace() {
       }
 
       const result = data as FeatureValidationResult;
-      setFeatureSuggestionState({ status: "ready", result });
+      setFeatureSuggestionState({ status: "ready", result, decisions: {} });
       toasts.add({
         title: "Feature suggestions generated",
         description: "Review suggested features."
@@ -2952,6 +3113,24 @@ function DatasetWorkspace() {
       });
     }
   }, [currentSummary, finalizedFeatureColumns, targetColumn, toasts]);
+
+  const decideFeatureSuggestion = useCallback(
+    (featureKey: string, decision: FeatureSuggestionDecision) => {
+      setTransformState({ status: "idle" });
+      setFeatureSuggestionState((current) => {
+        if (current.status !== "ready") return current;
+
+        return {
+          ...current,
+          decisions: {
+            ...current.decisions,
+            [featureKey]: decision
+          }
+        };
+      });
+    },
+    []
+  );
 
   const handleCsvFile = useCallback(
     async (file: File) => {
@@ -3472,6 +3651,7 @@ function DatasetWorkspace() {
               preprocessingState={preprocessingReviewState}
               featureSuggestionState={featureSuggestionState}
               onGenerateFeatures={() => void generateFeatureSuggestions()}
+              onFeatureSuggestionDecision={decideFeatureSuggestion}
               targetColumn={targetColumn}
               columnActions={columnActions}
               finalizedFeatureColumns={finalizedFeatureColumns}
