@@ -172,6 +172,23 @@ export interface SelectedPreprocessingStep {
   action: PreprocessingSuggestionAction;
 }
 
+export interface PreparedFeatureColumn {
+  name: string;
+  sourceColumn: string;
+  inferredType: InferredColumnType;
+  preprocessingActions: PreprocessingSuggestionAction[];
+  role: "passthrough" | "one_hot" | "split_name";
+}
+
+export interface PreparedFeatureContext {
+  columns: PreparedFeatureColumn[];
+  numericColumns: string[];
+  dateColumns: string[];
+  removedColumns: string[];
+  preprocessingSteps: SelectedPreprocessingStep[];
+  previewRows: Record<string, PreviewValue>[];
+}
+
 export interface CsvTransformationPlan {
   targetColumn: string;
   featureColumns: string[];
@@ -1203,6 +1220,138 @@ function groupStepsByColumn(steps: SelectedPreprocessingStep[]) {
   return grouped;
 }
 
+function valuesForPreparedCategories(
+  profile: AiReviewProfile,
+  columnName: string
+) {
+  const column = profile.columns.find((item) => item.name === columnName);
+  const values = [
+    ...(column?.topValues.map((item) => item.value) ?? []),
+    ...(column?.sampleValues ?? []),
+    ...profile.previewRows.map((row) => row[columnName])
+  ];
+
+  return Array.from(
+    new Set(
+      values
+        .map((value) => (value == null ? "" : String(value).trim()))
+        .filter(Boolean)
+    )
+  ).sort((left, right) => left.localeCompare(right));
+}
+
+export function buildPreparedFeatureContext(
+  profile: AiReviewProfile,
+  keptColumns: string[],
+  preprocessingSteps: SelectedPreprocessingStep[]
+): PreparedFeatureContext {
+  const stepsByColumn = groupStepsByColumn(preprocessingSteps);
+  const columnsByName = new Map(
+    profile.columns.map((column) => [column.name, column])
+  );
+  const preparedColumns: PreparedFeatureColumn[] = [];
+  const removedColumns: string[] = [];
+  const previewRows: Record<string, PreviewValue>[] = profile.previewRows.map(
+    () => ({})
+  );
+
+  keptColumns.forEach((columnName) => {
+    const column = columnsByName.get(columnName);
+    if (!column) return;
+
+    const actions = sortColumnActions(stepsByColumn.get(columnName) ?? []);
+
+    if (actions.some(isDropColumnAction)) {
+      removedColumns.push(columnName);
+      return;
+    }
+
+    if (actions.some(isSplitNameAction)) {
+      const firstName = `${columnName}_first`;
+      const lastName = `${columnName}_last`;
+      preparedColumns.push(
+        {
+          name: firstName,
+          sourceColumn: columnName,
+          inferredType: "string",
+          preprocessingActions: actions,
+          role: "split_name"
+        },
+        {
+          name: lastName,
+          sourceColumn: columnName,
+          inferredType: "string",
+          preprocessingActions: actions,
+          role: "split_name"
+        }
+      );
+      profile.previewRows.forEach((row, rowIndex) => {
+        const transformedValue = transformColumnValue(
+          row[columnName] == null ? "" : String(row[columnName]),
+          actions,
+          {}
+        );
+        const parsedName = parseFullName(transformedValue);
+        previewRows[rowIndex][firstName] = parsedName.first;
+        previewRows[rowIndex][lastName] = parsedName.last;
+      });
+      return;
+    }
+
+    if (actions.some(isOneHotAction)) {
+      const categories = valuesForPreparedCategories(profile, columnName);
+      categories.forEach((category) => {
+        const preparedName = `${columnName}__${sanitizeColumnSuffix(category)}`;
+        preparedColumns.push({
+          name: preparedName,
+          sourceColumn: columnName,
+          inferredType: "number",
+          preprocessingActions: actions,
+          role: "one_hot"
+        });
+        profile.previewRows.forEach((row, rowIndex) => {
+          const transformedValue = transformColumnValue(
+            row[columnName] == null ? "" : String(row[columnName]),
+            actions,
+            {}
+          );
+          previewRows[rowIndex][preparedName] =
+            transformedValue.trim() === category ? 1 : 0;
+        });
+      });
+      return;
+    }
+
+    preparedColumns.push({
+      name: columnName,
+      sourceColumn: columnName,
+      inferredType: column.inferredType,
+      preprocessingActions: actions,
+      role: "passthrough"
+    });
+    profile.previewRows.forEach((row, rowIndex) => {
+      previewRows[rowIndex][columnName] = transformColumnValue(
+        row[columnName] == null ? "" : String(row[columnName]),
+        actions,
+        {}
+      );
+    });
+  });
+
+  return {
+    columns: preparedColumns,
+    numericColumns: preparedColumns
+      .filter((column) => column.inferredType === "number")
+      .map((column) => column.name),
+    dateColumns: preparedColumns
+      .filter((column) => column.inferredType === "date")
+      .map((column) => column.name),
+    removedColumns,
+    preprocessingSteps,
+    previewRows
+  };
+}
+
 function sortColumnActions(actions: string[]) {
   const priority = (action: string) => {
     if (isStandardizeMissingAction(action)) return 10;
@@ -1307,10 +1456,12 @@ function transformColumnValue(
 
 function validateTransformationPlan(
   fields: string[],
-  plan: CsvTransformationPlan
+  plan: CsvTransformationPlan,
+  preparedFeatureColumns: string[]
 ) {
   const fieldSet = new Set(fields);
   const featureSet = new Set(plan.featureColumns);
+  const preparedFeatureSet = new Set(preparedFeatureColumns);
   const generatedFeatureNames = new Set<string>();
 
   if (!fieldSet.has(plan.targetColumn)) {
@@ -1341,9 +1492,9 @@ function validateTransformationPlan(
   });
 
   (plan.engineeredFeatures ?? []).forEach((feature) => {
-    if (fieldSet.has(feature.name)) {
+    if (fieldSet.has(feature.name) || preparedFeatureSet.has(feature.name)) {
       throw new Error(
-        `${feature.name} cannot be generated because it already exists in the CSV.`
+        `${feature.name} cannot be generated because it already exists in the prepared dataset.`
       );
     }
     if (generatedFeatureNames.has(feature.name)) {
@@ -1359,17 +1510,39 @@ function validateTransformationPlan(
           "Target leakage blocked: engineered features cannot use the target."
         );
       }
-      if (!fieldSet.has(columnName)) {
+      if (!preparedFeatureSet.has(columnName)) {
         throw new Error(
-          `${feature.name} references ${columnName}, which is not present in the CSV.`
-        );
-      }
-      if (!featureSet.has(columnName)) {
-        throw new Error(
-          `${feature.name} references ${columnName}, which is not a kept feature.`
+          `${feature.name} references ${columnName}, which is not present after preprocessing.`
         );
       }
     });
+  });
+}
+
+function getPreparedFeatureColumnNames(
+  plan: CsvTransformationPlan,
+  stats: Map<
+    string,
+    { mean?: string; median?: string; mode?: string; categories?: string[] }
+  >
+) {
+  return plan.featureColumns.flatMap((columnName) => {
+    const actions = sortColumnActions(
+      plan.preprocessingSteps
+        .filter((step) => step.columnName === columnName)
+        .map((step) => step.action)
+    );
+
+    if (actions.some(isDropColumnAction)) return [];
+    if (actions.some(isSplitNameAction)) {
+      return [`${columnName}_first`, `${columnName}_last`];
+    }
+    if (actions.some(isOneHotAction)) {
+      return (stats.get(columnName)?.categories ?? []).map(
+        (category) => `${columnName}__${sanitizeColumnSuffix(category)}`
+      );
+    }
+    return [columnName];
   });
 }
 
@@ -1420,7 +1593,7 @@ function transformRow(
 
   (plan.engineeredFeatures ?? []).forEach((feature) => {
     output[feature.name] = formatEngineeredFeatureValue(
-      evaluateFeatureExpression(feature.expression, row)
+      evaluateFeatureExpression(feature.expression, output)
     );
   });
 
@@ -1458,7 +1631,6 @@ export async function transformCsvFile(
   }
 
   const fields = parsed.meta.fields ?? Object.keys(parsed.data[0] ?? {});
-  validateTransformationPlan(fields, plan);
 
   const stepsByColumn = groupStepsByColumn(plan.preprocessingSteps);
 
@@ -1480,6 +1652,11 @@ export async function transformCsvFile(
       trainRows,
       plan.featureColumns,
       stepsByColumn
+    );
+    validateTransformationPlan(
+      fields,
+      plan,
+      getPreparedFeatureColumnNames(plan, trainStats)
     );
 
     // Transform both splits using the same fitted stats
@@ -1547,6 +1724,11 @@ export async function transformCsvFile(
     parsed.data,
     plan.featureColumns,
     stepsByColumn
+  );
+  validateTransformationPlan(
+    fields,
+    plan,
+    getPreparedFeatureColumnNames(plan, transformStats)
   );
   const outputRows = parsed.data.map((row) =>
     transformRow(row, plan, stepsByColumn, transformStats)

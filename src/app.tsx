@@ -1986,6 +1986,7 @@ function PreparationReviewPanel({
                 disabled={
                   !targetColumn ||
                   !isSelectionFinalized ||
+                  preprocessingState.status !== "ready" ||
                   featureSuggestionState.status === "loading"
                 }
                 onClick={onGenerateFeatures}
@@ -2000,10 +2001,15 @@ function PreparationReviewPanel({
                 <Text size="sm" variant="secondary">
                   Finalize Step 2 before generating engineered features.
                 </Text>
+              ) : preprocessingState.status !== "ready" ? (
+                <Text size="sm" variant="secondary">
+                  Generate and lock preprocessing choices before requesting
+                  engineered features.
+                </Text>
               ) : featureSuggestionState.status === "idle" ? (
                 <Text size="sm" variant="secondary">
-                  Click "Generate Features" to ask the model for engineered
-                  features.
+                  Click "Generate Features" to use the locked preprocessing
+                  choices and prepared feature schema.
                 </Text>
               ) : featureSuggestionState.status === "loading" ? (
                 <Text size="sm" variant="secondary">
@@ -3074,11 +3080,21 @@ function DatasetWorkspace() {
   ]);
 
   const generateFeatureSuggestions = useCallback(async () => {
-    if (!currentSummary || !targetColumn || !finalizedFeatureColumns) return;
+    if (
+      !currentSummary ||
+      !targetColumn ||
+      !finalizedFeatureColumns ||
+      preprocessingReviewState.status !== "ready"
+    ) {
+      return;
+    }
 
     const keptColumns = finalizedFeatureColumns.filter(
       (columnName) => columnName !== targetColumn
     );
+    const preprocessingSteps = buildSelectedPreprocessingSteps(
+      preprocessingChoices
+    ).filter((step) => keptColumns.includes(step.columnName));
 
     setFeatureSuggestionState({ status: "loading" });
     try {
@@ -3088,7 +3104,8 @@ function DatasetWorkspace() {
         body: JSON.stringify({
           profile: buildAiReviewProfile(currentSummary),
           targetColumn,
-          keptColumns
+          keptColumns,
+          preprocessingSteps
         })
       });
       const data = await response.json().catch(() => null);
@@ -3112,7 +3129,14 @@ function DatasetWorkspace() {
         message: error instanceof Error ? error.message : String(error)
       });
     }
-  }, [currentSummary, finalizedFeatureColumns, targetColumn, toasts]);
+  }, [
+    currentSummary,
+    finalizedFeatureColumns,
+    preprocessingChoices,
+    preprocessingReviewState.status,
+    targetColumn,
+    toasts
+  ]);
 
   const decideFeatureSuggestion = useCallback(
     (featureKey: string, decision: FeatureSuggestionDecision) => {

@@ -2,6 +2,7 @@ import { describe, expect, test } from "vitest";
 import {
   buildAiReviewProfile,
   buildDatasetIntent,
+  buildPreparedFeatureContext,
   isTrainingRow,
   parseCsvFile,
   transformCsvFile,
@@ -161,6 +162,50 @@ describe("parseCsvFile", () => {
 });
 
 describe("transformCsvFile", () => {
+  test("builds prepared feature context from accepted preprocessing choices", async () => {
+    const parsedSummary = await parseCsvFile(
+      new File(
+        [
+          [
+            "Name,Embarked,Fare,Survived",
+            '"Braund, Mr. Owen Harris",S,7.25,0',
+            '"Cumings, Mrs. John Bradley",C,71.28,1'
+          ].join("\n")
+        ],
+        "titanic.csv",
+        { type: "text/csv" }
+      )
+    );
+
+    const context = buildPreparedFeatureContext(
+      buildAiReviewProfile(parsedSummary),
+      ["Name", "Embarked", "Fare"],
+      [
+        { columnName: "Name", action: "Split full names into parts" },
+        { columnName: "Embarked", action: "One-hot encode categories" }
+      ]
+    );
+
+    expect(context.columns.map((column) => column.name)).toEqual([
+      "Name_first",
+      "Name_last",
+      "Embarked__c",
+      "Embarked__s",
+      "Fare"
+    ]);
+    expect(context.numericColumns).toEqual([
+      "Embarked__c",
+      "Embarked__s",
+      "Fare"
+    ]);
+    expect(context.previewRows[0]).toMatchObject({
+      Name_first: "Owen",
+      Name_last: "Harris",
+      Embarked__s: 1,
+      Fare: "7.25"
+    });
+  });
+
   test("keeps split export row counts aligned with the training predicate", async () => {
     const file = new File(
       [
@@ -279,6 +324,47 @@ describe("transformCsvFile", () => {
     ]);
     expect(transformed.csv).toContain("20,1000,50,no");
     expect(transformed.audit).toContain("1 accepted engineered feature added.");
+  });
+
+  test("exports engineered features from post-preprocessing columns", async () => {
+    const file = new File(
+      ["age,embarked,churn\n20,S,no\n40,C,yes"],
+      "encoded-features.csv",
+      { type: "text/csv" }
+    );
+
+    const result = await transformCsvFile(file, {
+      targetColumn: "churn",
+      featureColumns: ["age", "embarked"],
+      preprocessingSteps: [
+        { columnName: "embarked", action: "One-hot encode categories" }
+      ],
+      engineeredFeatures: [
+        {
+          expression: {
+            op: "product",
+            left: "age",
+            right: "embarked__s"
+          },
+          name: "fe_age_if_embarked_s",
+          reason: "Captures age only for S embarkation.",
+          expectedBenefit: "Adds a simple interaction with the encoded value.",
+          warnings: []
+        }
+      ]
+    });
+    const transformed =
+      result as import("./csv-profile").CsvTransformationResult;
+
+    expect(transformed.outputColumns).toEqual([
+      "age",
+      "embarked__c",
+      "embarked__s",
+      "fe_age_if_embarked_s",
+      "churn"
+    ]);
+    expect(transformed.csv).toContain("20,0,1,20,no");
+    expect(transformed.csv).toContain("40,1,0,0,yes");
   });
 
   test("blocks target leakage in preprocessing steps", async () => {

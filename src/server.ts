@@ -15,6 +15,7 @@ import {
   validateFeatureSuggestions,
   type FeatureValidationContext
 } from "./feature-engineering";
+import { buildPreparedFeatureContext } from "./csv-profile";
 import { z } from "zod";
 
 const DEFAULT_AI_MODEL = "@cf/qwen/qwen3-30b-a3b-fp8";
@@ -120,10 +121,15 @@ const preprocessingRequestSchema = z.object({
   targetColumn: z.string(),
   keptColumns: z.array(z.string())
 });
+const selectedPreprocessingStepSchema = z.object({
+  columnName: z.string(),
+  action: preprocessingSuggestionActionSchema
+});
 const featureSuggestionRequestSchema = z.object({
   profile: z.lazy(() => reviewProfileSchema),
   targetColumn: z.string(),
-  keptColumns: z.array(z.string())
+  keptColumns: z.array(z.string()),
+  preprocessingSteps: z.array(selectedPreprocessingStepSchema)
 });
 
 const preprocessingPlanSchema = z.object({
@@ -172,7 +178,14 @@ const reviewProfileSchema = z.object({
   columns: z.array(
     z.object({
       name: z.string(),
-      inferredType: z.string(),
+      inferredType: z.enum([
+        "string",
+        "number",
+        "boolean",
+        "date",
+        "empty",
+        "mixed"
+      ]),
       missingCount: z.number(),
       missingPercent: z.number(),
       nonMissingCount: z.number(),
@@ -188,7 +201,18 @@ const reviewProfileSchema = z.object({
       sampleValues: z.array(z.string()),
       profilingNotes: z.array(
         z.object({
-          code: z.string(),
+          code: z.enum([
+            "leading_trailing_whitespace",
+            "case_variants",
+            "numeric_after_trim",
+            "boolean_after_case_fold",
+            "date_after_trim",
+            "missing_like_tokens",
+            "high_missingness",
+            "constant_column",
+            "likely_identifier",
+            "empty_column"
+          ]),
           message: z.string(),
           affectedCount: z.number()
         })
@@ -207,7 +231,14 @@ const reviewProfileSchema = z.object({
       description: z.string()
     })
   ),
-  previewRows: z.array(z.record(z.string(), z.unknown())).max(20)
+  previewRows: z
+    .array(
+      z.record(
+        z.string(),
+        z.union([z.string(), z.number(), z.boolean(), z.null()])
+      )
+    )
+    .max(20)
 });
 
 type ReviewProfile = z.infer<typeof reviewProfileSchema>;
@@ -1044,20 +1075,14 @@ ${JSON.stringify(profile)}`;
 function buildFeatureSuggestionPrompt({
   profile,
   targetColumn,
-  keptColumns
+  keptColumns,
+  preprocessingSteps
 }: z.infer<typeof featureSuggestionRequestSchema>) {
-  const kept = new Set(keptColumns);
-  const scopedColumns = profile.columns.filter((column) =>
-    kept.has(column.name)
+  const preparedContext = buildPreparedFeatureContext(
+    profile,
+    keptColumns,
+    preprocessingSteps
   );
-  const scopedPreviewRows = profile.previewRows
-    .slice(0, 10)
-    .map((row) =>
-      Object.fromEntries(
-        Object.entries(row).filter(([columnName]) => kept.has(columnName))
-      )
-    );
-  const columns = scopedColumns.map((column) => column.name);
 
   return `Return JSON only. Do not use Markdown. Do not include prose before or after the JSON.
 
@@ -1083,13 +1108,29 @@ Allowed expression objects:
 
 Use exact column names from the input for any column references. Do not return expression as a string. Do not use keys like operation, transformation, columns, inputColumn, expected_benefit, or risk_notes. Prefer short, deterministic JSON values. Return an object: {"suggestions": [ ... ]}.
 The target column is ${JSON.stringify(targetColumn)}. Never reference the target column.
-Only reference columns from the provided input columns list.
+Only reference columns from the prepared columns list.
+The prepared columns list reflects accepted preprocessing choices. Columns removed or encoded by preprocessing are not available under their original names.
 
-Input columns:
-${JSON.stringify(columns)}
+Original kept columns:
+${JSON.stringify(keptColumns)}
 
-Preview rows (first 10):
-${JSON.stringify(scopedPreviewRows)}`;
+Accepted preprocessing steps:
+${JSON.stringify(preprocessingSteps)}
+
+Prepared columns after preprocessing:
+${JSON.stringify(preparedContext.columns)}
+
+Numeric prepared columns:
+${JSON.stringify(preparedContext.numericColumns)}
+
+Date prepared columns:
+${JSON.stringify(preparedContext.dateColumns)}
+
+Removed original columns:
+${JSON.stringify(preparedContext.removedColumns)}
+
+Prepared preview rows (first 10):
+${JSON.stringify(preparedContext.previewRows.slice(0, 10))}`;
 }
 
 function parseFeatureSuggestionsText(text: string) {
@@ -1128,12 +1169,13 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
     return Response.json(
       {
         error:
-          "Request must include a valid profile, targetColumn, and keptColumns."
+          "Request must include a valid profile, targetColumn, keptColumns, and preprocessingSteps."
       },
       { status: 400 }
     );
   }
-  const { profile, targetColumn, keptColumns } = parsedRequest.data;
+  const { profile, targetColumn, keptColumns, preprocessingSteps } =
+    parsedRequest.data;
   const profileColumns = profile.columns.map((column) => column.name);
   const allowedColumns = new Set(profileColumns);
   const sanitizedKeptColumns = keptColumns.filter(
@@ -1141,11 +1183,17 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
       allowedColumns.has(columnName) && columnName !== targetColumn
   );
   const keptColumnSet = new Set(sanitizedKeptColumns);
-  const scopedColumns = profile.columns.filter((column) =>
-    keptColumnSet.has(column.name)
+  const sanitizedPreprocessingSteps = preprocessingSteps.filter(
+    (step) =>
+      keptColumnSet.has(step.columnName) && step.columnName !== targetColumn
+  );
+  const preparedContext = buildPreparedFeatureContext(
+    profile,
+    sanitizedKeptColumns,
+    sanitizedPreprocessingSteps
   );
 
-  if (scopedColumns.length === 0) {
+  if (preparedContext.columns.length === 0) {
     return Response.json({ accepted: [], rejected: [] });
   }
 
@@ -1160,7 +1208,8 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
     prompt: buildFeatureSuggestionPrompt({
       profile,
       targetColumn,
-      keptColumns: sanitizedKeptColumns
+      keptColumns: sanitizedKeptColumns,
+      preprocessingSteps: sanitizedPreprocessingSteps
     })
   });
 
@@ -1178,24 +1227,23 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
     return Response.json({ accepted: [], rejected: [] });
   }
 
-  const availableColumns = scopedColumns.map((column) => column.name);
-  const numericColumns = scopedColumns
-    .filter((c) => c.inferredType === "number")
-    .map((c) => c.name);
-  const dateColumns = scopedColumns
-    .filter((c) => c.inferredType === "date")
-    .map((c) => c.name);
-  const blockedColumns = profileColumns.filter(
-    (columnName) => !keptColumnSet.has(columnName)
+  const availableColumns = preparedContext.columns.map((column) => column.name);
+  const blockedColumns = Array.from(
+    new Set([
+      ...profileColumns.filter((columnName) => !keptColumnSet.has(columnName)),
+      ...preparedContext.removedColumns
+    ])
   );
 
   const context: FeatureValidationContext = {
     availableColumns,
-    numericColumns,
-    dateColumns,
+    numericColumns: preparedContext.numericColumns,
+    dateColumns: preparedContext.dateColumns,
     targetColumn,
     blockedColumns,
-    existingColumns: profileColumns
+    existingColumns: Array.from(
+      new Set([...profileColumns, ...availableColumns])
+    )
   };
 
   const validation = validateFeatureSuggestions(parsed.suggestions, context);
