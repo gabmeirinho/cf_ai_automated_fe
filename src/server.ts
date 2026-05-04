@@ -1053,7 +1053,10 @@ ${JSON.stringify(profile.previewRows.slice(0, 10))}`;
 function parseFeatureSuggestionsText(text: string) {
   const jsonText = extractJsonObject(text);
   if (!jsonText) {
-    return { success: false as const, error: "No JSON object found in model output" };
+    return {
+      success: false as const,
+      error: "No JSON object found in model output"
+    };
   }
 
   try {
@@ -1083,7 +1086,10 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
     | undefined;
 
   if (!profile) {
-    return Response.json({ error: "Request must include a valid compact dataset profile." }, { status: 400 });
+    return Response.json(
+      { error: "Request must include a valid compact dataset profile." },
+      { status: 400 }
+    );
   }
 
   const workersai = createWorkersAI({ binding: env.AI });
@@ -1092,7 +1098,8 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
   const result = await generateTextWithRetries({
     model: workersai(model),
     ...JSON_GENERATION_SETTINGS,
-    system: "You suggest feature engineering transformations. Output JSON only.",
+    system:
+      "You suggest feature engineering transformations. Output JSON only.",
     prompt: buildFeatureSuggestionPrompt(profile)
   });
 
@@ -1280,7 +1287,9 @@ async function handleAiReview(request: Request, env: Env) {
   if (preprocessingResult && typeof preprocessingResult.text === "string") {
     parsedPreprocessing = parseLlmPreprocessingText(preprocessingResult.text);
   } else {
-    console.warn("AI preprocessing call returned no text", { preprocessingResult });
+    console.warn("AI preprocessing call returned no text", {
+      preprocessingResult
+    });
   }
 
   if (!parsedPreprocessing.success) {
@@ -1412,10 +1421,9 @@ async function handlePreprocessingReview(request: Request, env: Env) {
   }
 
   const suggestionsByColumn = new Map(
-    parsedPreprocessing.review.preprocessingSuggestions.map((suggestion: any) => [
-      suggestion.columnName,
-      suggestion
-    ])
+    parsedPreprocessing.review.preprocessingSuggestions.map(
+      (suggestion: any) => [suggestion.columnName, suggestion]
+    )
   );
   const preprocessingSuggestions = sanitizedKeptColumns
     .map((columnName) => {

@@ -62,7 +62,8 @@ export function validateFeatureSuggestions(
     if (!isAiFeatureSuggestion(suggestion)) {
       rejected.push({
         suggestion,
-        reason: "Suggestion does not match the expected AI feature suggestion shape."
+        reason:
+          "Suggestion does not match the expected AI feature suggestion shape."
       });
       continue;
     }
@@ -79,7 +80,9 @@ export function validateFeatureSuggestions(
 
     const inputColumns = getInputColumns(expression);
 
-    const unknownColumn = inputColumns.find((column) => !availableColumns.has(column));
+    const unknownColumn = inputColumns.find(
+      (column) => !availableColumns.has(column)
+    );
     if (unknownColumn) {
       rejected.push({
         suggestion,
@@ -96,7 +99,9 @@ export function validateFeatureSuggestions(
       continue;
     }
 
-    const blockedColumn = inputColumns.find((column) => blockedColumns.has(column));
+    const blockedColumn = inputColumns.find((column) =>
+      blockedColumns.has(column)
+    );
     if (blockedColumn) {
       rejected.push({
         suggestion,
@@ -310,7 +315,9 @@ export function getInputColumns(expr: FeatureExpression): string[] {
   }
 }
 
-export function isFeatureExpression(value: unknown): value is FeatureExpression {
+export function isFeatureExpression(
+  value: unknown
+): value is FeatureExpression {
   if (!isRecord(value)) return false;
 
   switch (value.op) {
@@ -350,7 +357,8 @@ export function isAiFeatureSuggestion(
   if (!isRecord(value)) return false;
 
   if (!isFeatureExpression(value.expression)) return false;
-  if (typeof value.reason !== "string" || value.reason.trim() === "") return false;
+  if (typeof value.reason !== "string" || value.reason.trim() === "")
+    return false;
 
   if (
     typeof value.expectedBenefit !== "string" ||
@@ -365,7 +373,8 @@ export function isAiFeatureSuggestion(
 
   if (value.riskNotes !== undefined) {
     if (!Array.isArray(value.riskNotes)) return false;
-    if (!value.riskNotes.every((note) => typeof note === "string")) return false;
+    if (!value.riskNotes.every((note) => typeof note === "string"))
+      return false;
   }
 
   return true;
