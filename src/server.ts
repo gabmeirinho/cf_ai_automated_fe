@@ -23,12 +23,17 @@ const JSON_GENERATION_SETTINGS = {
   temperature: 0
 } as const;
 
+type GenerateTextOptions = Parameters<typeof generateText>[0];
+
 // Wrap generateText with simple retry on transient errors (e.g., 504 Gateway Time-out).
-async function generateTextWithRetries(opts: any, attempts = 3) {
+async function generateTextWithRetries(
+  opts: GenerateTextOptions,
+  attempts = 3
+) {
   for (let i = 0; i < attempts; i++) {
     try {
       return await generateText(opts);
-    } catch (err: any) {
+    } catch (err: unknown) {
       const msg = String(err || "");
       const isGateway =
         msg.includes("504") ||
@@ -111,6 +116,11 @@ const columnSelectionPlanSchema = z.object({
 });
 
 const preprocessingRequestSchema = z.object({
+  profile: z.lazy(() => reviewProfileSchema),
+  targetColumn: z.string(),
+  keptColumns: z.array(z.string())
+});
+const featureSuggestionRequestSchema = z.object({
   profile: z.lazy(() => reviewProfileSchema),
   targetColumn: z.string(),
   keptColumns: z.array(z.string())
@@ -236,6 +246,10 @@ function getJsonPayload(value: unknown): unknown {
   }
 
   return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function roleForProfileColumn(
@@ -1027,27 +1041,55 @@ Input profile:
 ${JSON.stringify(profile)}`;
 }
 
-function buildFeatureSuggestionPrompt(profile: ReviewProfile) {
-  const columns = profile.columns.map((c) => c.name);
+function buildFeatureSuggestionPrompt({
+  profile,
+  targetColumn,
+  keptColumns
+}: z.infer<typeof featureSuggestionRequestSchema>) {
+  const kept = new Set(keptColumns);
+  const scopedColumns = profile.columns.filter((column) =>
+    kept.has(column.name)
+  );
+  const scopedPreviewRows = profile.previewRows
+    .slice(0, 10)
+    .map((row) =>
+      Object.fromEntries(
+        Object.entries(row).filter(([columnName]) => kept.has(columnName))
+      )
+    );
+  const columns = scopedColumns.map((column) => column.name);
 
   return `Return JSON only. Do not use Markdown. Do not include prose before or after the JSON.
 
 Provide an array called "suggestions" containing suggested features derived from the input columns. Each suggestion must match this shape:
 {
-  "expression": { /* one of the allowed feature expressions: log1p, sqrt, square, ratio, difference, product, date_year, date_month, date_dayofweek */ },
+  "expression": { "op": "ratio", "numerator": "exact numeric column", "denominator": "exact numeric column" },
   "name": "optional short name for the feature",
   "reason": "short explanation of why this feature is useful",
   "expectedBenefit": "short statement of expected benefit",
   "riskNotes": ["optional list of short risk notes"]
 }
 
-Use exact column names from the input for any column references. Prefer short, deterministic JSON values. Return an object: {"suggestions": [ ... ]}.
+Allowed expression objects:
+- {"op":"log1p","column":"exact numeric column"}
+- {"op":"sqrt","column":"exact numeric column"}
+- {"op":"square","column":"exact numeric column"}
+- {"op":"ratio","numerator":"exact numeric column","denominator":"exact numeric column"}
+- {"op":"difference","left":"exact numeric column","right":"exact numeric column"}
+- {"op":"product","left":"exact numeric column","right":"exact numeric column"}
+- {"op":"date_year","column":"exact date column"}
+- {"op":"date_month","column":"exact date column"}
+- {"op":"date_dayofweek","column":"exact date column"}
+
+Use exact column names from the input for any column references. Do not return expression as a string. Do not use keys like operation, transformation, columns, inputColumn, expected_benefit, or risk_notes. Prefer short, deterministic JSON values. Return an object: {"suggestions": [ ... ]}.
+The target column is ${JSON.stringify(targetColumn)}. Never reference the target column.
+Only reference columns from the provided input columns list.
 
 Input columns:
 ${JSON.stringify(columns)}
 
 Preview rows (first 10):
-${JSON.stringify(profile.previewRows.slice(0, 10))}`;
+${JSON.stringify(scopedPreviewRows)}`;
 }
 
 function parseFeatureSuggestionsText(text: string) {
@@ -1061,16 +1103,16 @@ function parseFeatureSuggestionsText(text: string) {
 
   try {
     const parsed = JSON.parse(jsonText);
-    if (!parsed || typeof parsed !== "object") {
+    if (!isRecord(parsed)) {
       return { success: false as const, error: "Parsed JSON is not an object" };
     }
 
-    const suggestions = Array.isArray((parsed as any).suggestions)
-      ? (parsed as any).suggestions
+    const suggestions = Array.isArray(parsed.suggestions)
+      ? parsed.suggestions
       : [];
 
     return { success: true as const, suggestions };
-  } catch (err: any) {
+  } catch (err: unknown) {
     return { success: false as const, error: String(err) };
   }
 }
@@ -1081,15 +1123,30 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
   }
 
   const body = await request.json().catch(() => null);
-  const profile = (body as { profile?: unknown } | null)?.profile as
-    | ReviewProfile
-    | undefined;
-
-  if (!profile) {
+  const parsedRequest = featureSuggestionRequestSchema.safeParse(body);
+  if (!parsedRequest.success) {
     return Response.json(
-      { error: "Request must include a valid compact dataset profile." },
+      {
+        error:
+          "Request must include a valid profile, targetColumn, and keptColumns."
+      },
       { status: 400 }
     );
+  }
+  const { profile, targetColumn, keptColumns } = parsedRequest.data;
+  const profileColumns = profile.columns.map((column) => column.name);
+  const allowedColumns = new Set(profileColumns);
+  const sanitizedKeptColumns = keptColumns.filter(
+    (columnName) =>
+      allowedColumns.has(columnName) && columnName !== targetColumn
+  );
+  const keptColumnSet = new Set(sanitizedKeptColumns);
+  const scopedColumns = profile.columns.filter((column) =>
+    keptColumnSet.has(column.name)
+  );
+
+  if (scopedColumns.length === 0) {
+    return Response.json({ accepted: [], rejected: [] });
   }
 
   const workersai = createWorkersAI({ binding: env.AI });
@@ -1100,7 +1157,11 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
     ...JSON_GENERATION_SETTINGS,
     system:
       "You suggest feature engineering transformations. Output JSON only.",
-    prompt: buildFeatureSuggestionPrompt(profile)
+    prompt: buildFeatureSuggestionPrompt({
+      profile,
+      targetColumn,
+      keptColumns: sanitizedKeptColumns
+    })
   });
 
   if (!result || typeof result.text !== "string") {
@@ -1117,20 +1178,24 @@ async function handleFeatureSuggestions(request: Request, env: Env) {
     return Response.json({ accepted: [], rejected: [] });
   }
 
-  const availableColumns = profile.columns.map((c) => c.name);
-  const numericColumns = profile.columns
+  const availableColumns = scopedColumns.map((column) => column.name);
+  const numericColumns = scopedColumns
     .filter((c) => c.inferredType === "number")
     .map((c) => c.name);
-  const dateColumns = profile.columns
+  const dateColumns = scopedColumns
     .filter((c) => c.inferredType === "date")
     .map((c) => c.name);
+  const blockedColumns = profileColumns.filter(
+    (columnName) => !keptColumnSet.has(columnName)
+  );
 
   const context: FeatureValidationContext = {
     availableColumns,
     numericColumns,
     dateColumns,
-    targetColumn: undefined,
-    blockedColumns: []
+    targetColumn,
+    blockedColumns,
+    existingColumns: profileColumns
   };
 
   const validation = validateFeatureSuggestions(parsed.suggestions, context);
@@ -1421,9 +1486,10 @@ async function handlePreprocessingReview(request: Request, env: Env) {
   }
 
   const suggestionsByColumn = new Map(
-    parsedPreprocessing.review.preprocessingSuggestions.map(
-      (suggestion: any) => [suggestion.columnName, suggestion]
-    )
+    parsedPreprocessing.review.preprocessingSuggestions.map((suggestion) => [
+      suggestion.columnName,
+      suggestion
+    ])
   );
   const preprocessingSuggestions = sanitizedKeptColumns
     .map((columnName) => {

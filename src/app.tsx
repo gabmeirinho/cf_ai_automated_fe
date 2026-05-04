@@ -3,6 +3,7 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import type { ChatAgent } from "./server";
+import type { FeatureValidationResult } from "./feature-engineering";
 import {
   MAX_CSV_SIZE_BYTES,
   buildAiReviewProfile,
@@ -101,6 +102,12 @@ type PreprocessingReviewState =
   | { status: "idle" }
   | { status: "loading" }
   | { status: "ready"; plan: ColumnPreprocessingPlan }
+  | { status: "error"; message: string };
+
+type FeatureSuggestionState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "ready"; result: FeatureValidationResult }
   | { status: "error"; message: string };
 
 type TransformState =
@@ -1312,11 +1319,7 @@ function PreparationReviewPanel({
   transformState: TransformState;
   onGenerate: () => void;
   onGeneratePreprocessing: () => void;
-  featureSuggestionState:
-    | { status: "idle" }
-    | { status: "loading" }
-    | { status: "ready"; result: any }
-    | { status: "error"; message: string };
+  featureSuggestionState: FeatureSuggestionState;
   onGenerateFeatures: () => void;
   onDownloadTransformed: () => void;
   onAcceptTarget: (columnName: string) => void;
@@ -1732,20 +1735,6 @@ function PreparationReviewPanel({
                     : "Finalize your selection to proceed with preprocessing recommendations."}
               </Text>
               <div className="flex flex-wrap gap-2 sm:gap-3">
-                {isSelectionFinalized && (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    icon={<BrainIcon size={14} />}
-                    disabled={featureSuggestionState.status === "loading"}
-                    onClick={onGenerateFeatures}
-                  >
-                    {featureSuggestionState.status === "loading"
-                      ? "Generating..."
-                      : "Generate Features"}
-                  </Button>
-                )}
                 <Button
                   type="button"
                   variant="primary"
@@ -1763,155 +1752,6 @@ function PreparationReviewPanel({
               </div>
             </div>
           </div>
-
-          {isSelectionFinalized && featureSuggestionState.status !== "idle" && (
-            <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-5 shadow-sm">
-              <div className="mb-4">
-                <Text size="base" bold>
-                  Feature Engineering Suggestions
-                </Text>
-                <Text size="sm" variant="secondary" DANGEROUS_className="mt-1">
-                  Review and accept/reject suggested engineered features.
-                </Text>
-              </div>
-              {featureSuggestionState.status === "loading" && (
-                <div className="py-8 text-center">
-                  <Text size="sm" variant="secondary">
-                    Generating feature suggestions...
-                  </Text>
-                </div>
-              )}
-              {featureSuggestionState.status === "error" && (
-                <div className="rounded-md border border-kumo-danger/40 bg-kumo-danger/10 px-4 py-3">
-                  <Text size="sm" DANGEROUS_className="text-kumo-danger">
-                    {(featureSuggestionState as any).message}
-                  </Text>
-                </div>
-              )}
-              {featureSuggestionState.status === "ready" && (
-                <div className="grid gap-4">
-                  {((featureSuggestionState as any).result.accepted?.length ??
-                    0) > 0 && (
-                    <div>
-                      <div className="mb-3 flex items-center gap-2">
-                        <CheckCircleIcon
-                          size={16}
-                          className="text-kumo-success"
-                        />
-                        <Text size="sm" bold>
-                          Accepted (
-                          {
-                            (featureSuggestionState as any).result.accepted
-                              .length
-                          }
-                          )
-                        </Text>
-                      </div>
-                      <div className="grid gap-2">
-                        {(featureSuggestionState as any).result.accepted.map(
-                          (feature: any, idx: number) => (
-                            <div
-                              key={idx}
-                              className="rounded-lg border border-kumo-success/30 bg-kumo-success/5 p-3"
-                            >
-                              <div className="flex items-start justify-between gap-2">
-                                <div className="flex-1">
-                                  <Text
-                                    size="sm"
-                                    bold
-                                    DANGEROUS_className="text-kumo-default"
-                                  >
-                                    {feature.name}
-                                  </Text>
-                                  <Text
-                                    size="xs"
-                                    variant="secondary"
-                                    DANGEROUS_className="mt-1"
-                                  >
-                                    {feature.reason}
-                                  </Text>
-                                  <Text
-                                    size="xs"
-                                    DANGEROUS_className="mt-1 text-kumo-brand"
-                                  >
-                                    Expected benefit: {feature.expectedBenefit}
-                                  </Text>
-                                  {feature.warnings?.length > 0 && (
-                                    <div className="mt-2 flex flex-wrap gap-1">
-                                      {feature.warnings.map(
-                                        (warning: string, widx: number) => (
-                                          <Badge
-                                            key={widx}
-                                            variant="secondary"
-                                            className="bg-kumo-warning/10 text-kumo-warning border-kumo-warning/20 text-[10px]"
-                                          >
-                                            {warning}
-                                          </Badge>
-                                        )
-                                      )}
-                                    </div>
-                                  )}
-                                </div>
-                                <CheckCircleIcon
-                                  size={18}
-                                  className="text-kumo-success flex-shrink-0"
-                                />
-                              </div>
-                            </div>
-                          )
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {((featureSuggestionState as any).result.rejected?.length ??
-                    0) > 0 && (
-                    <div>
-                      <div className="mb-3 flex items-center gap-2">
-                        <XCircleIcon size={16} className="text-kumo-danger" />
-                        <Text size="sm" bold>
-                          Rejected (
-                          {
-                            (featureSuggestionState as any).result.rejected
-                              .length
-                          }
-                          )
-                        </Text>
-                      </div>
-                      <div className="grid gap-2">
-                        {(featureSuggestionState as any).result.rejected.map(
-                          (rejection: any, idx: number) => (
-                            <div
-                              key={idx}
-                              className="rounded-lg border border-kumo-danger/30 bg-kumo-danger/5 p-3"
-                            >
-                              <div className="flex items-start gap-2">
-                                <div className="flex-1">
-                                  <Text
-                                    size="xs"
-                                    bold
-                                    DANGEROUS_className="text-kumo-danger"
-                                  >
-                                    Rejected
-                                  </Text>
-                                  <Text
-                                    size="xs"
-                                    variant="secondary"
-                                    DANGEROUS_className="mt-1"
-                                  >
-                                    {rejection.reason}
-                                  </Text>
-                                </div>
-                              </div>
-                            </div>
-                          )
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
 
           <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
             <div className="flex flex-col gap-3 border-b border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
@@ -2070,6 +1910,179 @@ function PreparationReviewPanel({
             )}
           </div>
 
+          <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+            <div className="flex flex-col gap-3 border-b border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-center gap-3">
+                <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
+                  <BrainIcon size={20} />
+                </div>
+                <div>
+                  <Text size="base" bold>
+                    4. Feature Suggestions
+                  </Text>
+                  <Text size="sm" variant="secondary">
+                    Candidate engineered features proposed for kept columns.
+                  </Text>
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="primary"
+                size="sm"
+                icon={<MagnifyingGlassIcon size={14} />}
+                disabled={
+                  !targetColumn ||
+                  !isSelectionFinalized ||
+                  featureSuggestionState.status === "loading"
+                }
+                onClick={onGenerateFeatures}
+              >
+                {featureSuggestionState.status === "loading"
+                  ? "Suggesting..."
+                  : "Generate Features"}
+              </Button>
+            </div>
+            <div className="p-5">
+              {!isSelectionFinalized ? (
+                <Text size="sm" variant="secondary">
+                  Finalize Step 2 before generating engineered features.
+                </Text>
+              ) : featureSuggestionState.status === "idle" ? (
+                <Text size="sm" variant="secondary">
+                  Click "Generate Features" to ask the model for engineered
+                  features.
+                </Text>
+              ) : featureSuggestionState.status === "loading" ? (
+                <Text size="sm" variant="secondary">
+                  Generating feature suggestions...
+                </Text>
+              ) : featureSuggestionState.status === "error" ? (
+                <div className="rounded-md border border-kumo-danger/40 bg-kumo-danger/10 px-4 py-3">
+                  <Text size="sm" DANGEROUS_className="text-kumo-danger">
+                    {featureSuggestionState.message}
+                  </Text>
+                </div>
+              ) : (
+                <div className="grid gap-4">
+                  {featureSuggestionState.result.accepted.length > 0 && (
+                    <div>
+                      <div className="mb-3 flex items-center gap-2">
+                        <CheckCircleIcon
+                          size={16}
+                          className="text-kumo-success"
+                        />
+                        <Text size="sm" bold>
+                          Accepted (
+                          {featureSuggestionState.result.accepted.length})
+                        </Text>
+                      </div>
+                      <div className="grid gap-2">
+                        {featureSuggestionState.result.accepted.map(
+                          (feature, idx) => (
+                            <div
+                              key={`${feature.name}-${idx}`}
+                              className="rounded-lg border border-kumo-success/30 bg-kumo-success/5 p-3"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="flex-1">
+                                  <Text
+                                    size="sm"
+                                    bold
+                                    DANGEROUS_className="text-kumo-default"
+                                  >
+                                    {feature.name}
+                                  </Text>
+                                  <Text
+                                    size="xs"
+                                    variant="secondary"
+                                    DANGEROUS_className="mt-1"
+                                  >
+                                    {feature.reason}
+                                  </Text>
+                                  <Text
+                                    size="xs"
+                                    DANGEROUS_className="mt-1 text-kumo-brand"
+                                  >
+                                    Expected benefit: {feature.expectedBenefit}
+                                  </Text>
+                                  {feature.warnings.length > 0 && (
+                                    <div className="mt-2 flex flex-wrap gap-1">
+                                      {feature.warnings.map(
+                                        (warning, warningIndex) => (
+                                          <Badge
+                                            key={`${feature.name}-${warningIndex}`}
+                                            variant="secondary"
+                                            className="bg-kumo-warning/10 text-kumo-warning border-kumo-warning/20 text-[10px]"
+                                          >
+                                            {warning}
+                                          </Badge>
+                                        )
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+                                <CheckCircleIcon
+                                  size={18}
+                                  className="text-kumo-success flex-shrink-0"
+                                />
+                              </div>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {featureSuggestionState.result.rejected.length > 0 && (
+                    <div>
+                      <div className="mb-3 flex items-center gap-2">
+                        <XCircleIcon size={16} className="text-kumo-danger" />
+                        <Text size="sm" bold>
+                          Rejected (
+                          {featureSuggestionState.result.rejected.length})
+                        </Text>
+                      </div>
+                      <div className="grid gap-2">
+                        {featureSuggestionState.result.rejected.map(
+                          (rejection, idx) => (
+                            <div
+                              key={`rejected-${idx}`}
+                              className="rounded-lg border border-kumo-danger/30 bg-kumo-danger/5 p-3"
+                            >
+                              <div className="flex items-start gap-2">
+                                <div className="flex-1">
+                                  <Text
+                                    size="xs"
+                                    bold
+                                    DANGEROUS_className="text-kumo-danger"
+                                  >
+                                    Rejected
+                                  </Text>
+                                  <Text
+                                    size="xs"
+                                    variant="secondary"
+                                    DANGEROUS_className="mt-1"
+                                  >
+                                    {rejection.reason}
+                                  </Text>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  )}
+                  {featureSuggestionState.result.accepted.length === 0 &&
+                    featureSuggestionState.result.rejected.length === 0 && (
+                      <Text size="sm" variant="secondary">
+                        No feature suggestions were returned.
+                      </Text>
+                    )}
+                </div>
+              )}
+            </div>
+          </div>
+
           <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-6 shadow-sm">
             <div className="flex items-center gap-3 mb-6">
               <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
@@ -2210,82 +2223,6 @@ function PreparationReviewPanel({
               </div>
             )}
           </div>
-
-          <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
-            <div className="flex flex-col gap-3 border-b border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex items-center gap-3">
-                <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
-                  <BrainIcon size={20} />
-                </div>
-                <div>
-                  <Text size="base" bold>
-                    4. Feature Suggestions
-                  </Text>
-                  <Text size="sm" variant="secondary">
-                    Candidate engineered features proposed by the model.
-                  </Text>
-                </div>
-              </div>
-              <div className="flex gap-2">
-                <Button
-                  type="button"
-                  variant="primary"
-                  size="sm"
-                  icon={<MagnifyingGlassIcon size={14} />}
-                  disabled={featureSuggestionState.status === "loading"}
-                  onClick={onGenerateFeatures}
-                >
-                  {featureSuggestionState.status === "loading"
-                    ? "Suggesting..."
-                    : "Generate Features"}
-                </Button>
-              </div>
-            </div>
-            <div className="p-5">
-              {featureSuggestionState.status === "idle" && (
-                <Text size="sm" variant="secondary">
-                  Click "Generate Features" to ask the model for engineered
-                  features.
-                </Text>
-              )}
-              {featureSuggestionState.status === "loading" && (
-                <Text size="sm" variant="secondary">
-                  Generating suggestions...
-                </Text>
-              )}
-              {featureSuggestionState.status === "error" && (
-                <div className="rounded-md border border-kumo-danger/40 bg-kumo-danger/10 px-4 py-3">
-                  <Text size="sm" DANGEROUS_className="text-kumo-danger">
-                    {(featureSuggestionState as any).message}
-                  </Text>
-                </div>
-              )}
-              {featureSuggestionState.status === "ready" && (
-                <div>
-                  <Text size="sm" bold DANGEROUS_className="mb-2">
-                    Accepted
-                  </Text>
-                  <pre className="max-h-40 overflow-auto bg-kumo-base p-3 rounded text-xs">
-                    {JSON.stringify(
-                      (featureSuggestionState as any).result.accepted ?? [],
-                      null,
-                      2
-                    )}
-                  </pre>
-                  <Text size="sm" bold DANGEROUS_className="mt-3">
-                    Rejected
-                  </Text>
-                  <pre className="max-h-40 overflow-auto bg-kumo-base p-3 rounded text-xs">
-                    {JSON.stringify(
-                      (featureSuggestionState as any).result.rejected ?? [],
-                      null,
-                      2
-                    )}
-                  </pre>
-                </div>
-              )}
-            </div>
-          </div>
         </>
       )}
     </div>
@@ -2422,12 +2359,8 @@ function DatasetWorkspace() {
     useState<PreprocessingReviewState>({
       status: "idle"
     });
-  const [featureSuggestionState, setFeatureSuggestionState] = useState<
-    | { status: "idle" }
-    | { status: "loading" }
-    | { status: "ready"; result: any }
-    | { status: "error"; message: string }
-  >({ status: "idle" });
+  const [featureSuggestionState, setFeatureSuggestionState] =
+    useState<FeatureSuggestionState>({ status: "idle" });
   const [transformState, setTransformState] = useState<TransformState>({
     status: "idle"
   });
@@ -2547,6 +2480,7 @@ function DatasetWorkspace() {
     setUploadState({ status: "idle" });
     setAiReviewState({ status: "idle" });
     setPreprocessingReviewState({ status: "idle" });
+    setFeatureSuggestionState({ status: "idle" });
     setTransformState({ status: "idle" });
     setTargetColumn(null);
     setColumnActions({});
@@ -2562,6 +2496,7 @@ function DatasetWorkspace() {
 
     setAiReviewState({ status: "loading" });
     setPreprocessingReviewState({ status: "idle" });
+    setFeatureSuggestionState({ status: "idle" });
     setTransformState({ status: "idle" });
     setFinalizedFeatureColumns(null);
     try {
@@ -2641,6 +2576,7 @@ function DatasetWorkspace() {
 
   const acceptTarget = useCallback((columnName: string) => {
     setPreprocessingReviewState({ status: "idle" });
+    setFeatureSuggestionState({ status: "idle" });
     setTransformState({ status: "idle" });
     setFinalizedFeatureColumns(null);
     setPreprocessingChoices({});
@@ -2657,6 +2593,7 @@ function DatasetWorkspace() {
 
   const changeTarget = useCallback((columnName: string) => {
     setPreprocessingReviewState({ status: "idle" });
+    setFeatureSuggestionState({ status: "idle" });
     setTransformState({ status: "idle" });
     setFinalizedFeatureColumns(null);
     setPreprocessingChoices({});
@@ -2679,6 +2616,7 @@ function DatasetWorkspace() {
         [columnName]: action
       }));
       setPreprocessingReviewState({ status: "idle" });
+      setFeatureSuggestionState({ status: "idle" });
       setTransformState({ status: "idle" });
       setFinalizedFeatureColumns(null);
       if (action === "drop") {
@@ -2703,6 +2641,7 @@ function DatasetWorkspace() {
 
     setFinalizedFeatureColumns(keptColumns);
     setPreprocessingReviewState({ status: "idle" });
+    setFeatureSuggestionState({ status: "idle" });
     setTransformState({ status: "idle" });
     setPreprocessingChoices({});
     toasts.add({
@@ -2867,6 +2806,7 @@ function DatasetWorkspace() {
         });
         setAiReviewState({ status: "idle" });
         setPreprocessingReviewState({ status: "idle" });
+        setFeatureSuggestionState({ status: "idle" });
         setTransformState({ status: "idle" });
         setTargetColumn(null);
         setColumnActions({});
@@ -2892,7 +2832,7 @@ function DatasetWorkspace() {
         if (csvInputRef.current) csvInputRef.current.value = "";
       }
     },
-    [toasts, uploadState.status]
+    [toasts, uploadState]
   );
 
   const handleSplitCancel = useCallback(() => {
@@ -2973,14 +2913,22 @@ function DatasetWorkspace() {
   ]);
 
   const generateFeatureSuggestions = useCallback(async () => {
-    if (!currentSummary) return;
+    if (!currentSummary || !targetColumn || !finalizedFeatureColumns) return;
+
+    const keptColumns = finalizedFeatureColumns.filter(
+      (columnName) => columnName !== targetColumn
+    );
 
     setFeatureSuggestionState({ status: "loading" });
     try {
       const response = await fetch("/api/feature-suggestions", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ profile: buildAiReviewProfile(currentSummary) })
+        body: JSON.stringify({
+          profile: buildAiReviewProfile(currentSummary),
+          targetColumn,
+          keptColumns
+        })
       });
       const data = await response.json().catch(() => null);
 
@@ -2991,7 +2939,8 @@ function DatasetWorkspace() {
         );
       }
 
-      setFeatureSuggestionState({ status: "ready", result: data });
+      const result = data as FeatureValidationResult;
+      setFeatureSuggestionState({ status: "ready", result });
       toasts.add({
         title: "Feature suggestions generated",
         description: "Review suggested features."
@@ -3002,7 +2951,7 @@ function DatasetWorkspace() {
         message: error instanceof Error ? error.message : String(error)
       });
     }
-  }, [currentSummary, toasts]);
+  }, [currentSummary, finalizedFeatureColumns, targetColumn, toasts]);
 
   const handleCsvFile = useCallback(
     async (file: File) => {
@@ -3013,6 +2962,7 @@ function DatasetWorkspace() {
         if (!replace) return;
         setAiReviewState({ status: "idle" });
         setPreprocessingReviewState({ status: "idle" });
+        setFeatureSuggestionState({ status: "idle" });
         setTransformState({ status: "idle" });
         setTargetColumn(null);
         setColumnActions({});
@@ -3045,7 +2995,7 @@ function DatasetWorkspace() {
         });
       }
     },
-    [toasts, uploadState.status]
+    [uploadState.status]
   );
 
   const handleCsvInputChange = useCallback(
