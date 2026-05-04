@@ -1038,7 +1038,7 @@ function PreviewTable({
   rows: Record<string, string | number | boolean | null>[];
 }) {
   return (
-    <div className="min-w-0 max-w-full overflow-x-auto rounded-b-xl scrollbar-thin scrollbar-thumb-kumo-line scrollbar-track-transparent">
+    <div className="w-full min-w-0 max-w-full overflow-x-auto rounded-b-xl scrollbar-thin scrollbar-thumb-kumo-line scrollbar-track-transparent">
       <table className="w-max min-w-full table-fixed text-left text-xs">
         <thead className="bg-kumo-base/50 text-kumo-subtle sticky top-0 backdrop-blur-sm">
           <tr>
@@ -1683,9 +1683,9 @@ function PreparationReviewPanel({
   ];
 
   return (
-    <div className="grid gap-6">
+    <div className="grid min-w-0 gap-6">
       {plan && (
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid min-w-0 gap-4 sm:grid-cols-3">
           {workflowSteps.map((step, idx) => (
             <div
               key={step.label}
@@ -1730,7 +1730,7 @@ function PreparationReviewPanel({
           ))}
         </div>
       )}
-      <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-6 shadow-sm">
+      <div className="min-w-0 rounded-xl border border-kumo-line bg-kumo-elevated p-6 shadow-sm">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-start gap-3">
             <div className="mt-1 rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
@@ -1862,7 +1862,7 @@ function PreparationReviewPanel({
 
       {plan && (
         <>
-          <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+          <div className="min-w-0 overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
             <div className="flex flex-col gap-3 border-b border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-3">
                 <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
@@ -2015,7 +2015,7 @@ function PreparationReviewPanel({
             </div>
           </div>
 
-          <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+          <div className="min-w-0 overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
             <div className="flex flex-col gap-3 border-b border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-3">
                 <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
@@ -2172,7 +2172,7 @@ function PreparationReviewPanel({
             )}
           </div>
 
-          <div className="overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
+          <div className="min-w-0 overflow-hidden rounded-xl border border-kumo-line bg-kumo-elevated shadow-sm">
             <div className="flex flex-col gap-3 border-b border-kumo-line bg-kumo-base/30 p-5 sm:flex-row sm:items-center sm:justify-between">
               <div className="flex items-center gap-3">
                 <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
@@ -2424,7 +2424,7 @@ function PreparationReviewPanel({
             </div>
           </div>
 
-          <div className="rounded-xl border border-kumo-line bg-kumo-elevated p-6 shadow-sm">
+          <div className="min-w-0 rounded-xl border border-kumo-line bg-kumo-elevated p-6 shadow-sm">
             <div className="flex items-center gap-3 mb-6">
               <div className="rounded-lg bg-kumo-brand/10 p-2 text-kumo-brand">
                 <CheckCircleIcon size={20} />
@@ -2434,7 +2434,7 @@ function PreparationReviewPanel({
               </Text>
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-3">
+            <div className="grid min-w-0 gap-4 sm:grid-cols-3">
               <ColumnList
                 label="Prediction Target"
                 columns={targetColumn ? [targetColumn] : []}
@@ -2449,7 +2449,7 @@ function PreparationReviewPanel({
               />
             </div>
 
-            <div className="mt-4 rounded-xl border border-kumo-line bg-kumo-base p-5">
+            <div className="mt-4 min-w-0 rounded-xl border border-kumo-line bg-kumo-base p-5">
               <div className="flex items-center gap-2 mb-3">
                 <Badge
                   variant="secondary"
@@ -2511,7 +2511,7 @@ function PreparationReviewPanel({
             </div>
 
             {currentPreview && (
-              <div className="mt-4 min-w-0 rounded-xl border border-kumo-line bg-kumo-base p-5">
+              <div className="mt-4 w-full min-w-0 max-w-full overflow-hidden rounded-xl border border-kumo-line bg-kumo-base p-5">
                 <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                   <div className="flex items-center gap-2">
                     <Badge
